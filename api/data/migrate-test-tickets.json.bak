@@ -1,0 +1,31 @@
+[
+  {
+    "id": 1,
+    "title": "Fixture 1",
+    "description": "Desc 1",
+    "status": "queued",
+    "assigned_agent": "donky",
+    "priority": "medium",
+    "created": "2026-01-01T00:00:00.000Z",
+    "last_update": "2026-01-01T00:00:00.000Z",
+    "comments": [
+      {
+        "id": 1001,
+        "author": "u1",
+        "timestamp": "ts1",
+        "content": "c1"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "title": "Fixture 2",
+    "description": "Desc 2",
+    "status": "done",
+    "assigned_agent": "cowder",
+    "priority": "high",
+    "created": "2026-01-02T00:00:00.000Z",
+    "last_update": "2026-01-02T00:00:00.000Z",
+    "comments": []
+  }
+]
