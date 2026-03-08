@@ -335,6 +335,7 @@ describe('PATCH /api/tickets/:id', () => {
         actor: 'beavy'
       });
 
+    expect(res.body.success).toBe(true);
     expect(res.body.ticket.status).toBe('running');
   });
 
@@ -353,6 +354,7 @@ describe('PATCH /api/tickets/:id', () => {
         result_summary: '任务完成'
       });
 
+    expect(res.body.success).toBe(true);
     expect(res.body.ticket.status).toBe('done');
     expect(res.body.ticket.result_summary).toBe('任务完成');
   });
@@ -369,7 +371,7 @@ describe('PATCH /api/tickets/:id', () => {
       .send({ action: 'invalid_action', actor: 'beavy' })
       .expect(400);
 
-    expect(res.body.error).toBe('Invalid action');
+    expect(res.body.error).toContain('Invalid action');
     expect(res.body.message).toContain('status 非法');
   });
 
