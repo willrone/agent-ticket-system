@@ -146,18 +146,31 @@ export function ackNotificationEvent(eventId) {
 }
 
 /**
- * 检查工单是否已通知（仅检查已 ack 的事件）
- * 未 ack 的事件不做去重，允许重新进入 ready
+ * 检查工单是否已通知（检查任意已 ack 的事件）
+ *
+ * 设计说明：
+ * - 一旦某 ticket 在某 event_type 上已 ack，默认视为“该状态版本已通知过”。
+ * - 若状态后续发生变化，需要由业务层调用 clearNotificationEvents(ticketId)
+ *   来重置该 ticket 的通知历史，使其在新状态版本可再次通知。
  */
-export function hasRecentNotification(ticketId, eventType, withinMinutes = 60) {
+export function hasRecentNotification(ticketId, eventType) {
   const database = getDb();
-  const cutoff = new Date(Date.now() - withinMinutes * 60 * 1000).toISOString();
   const row = database.prepare(`
     SELECT id FROM notification_events
-    WHERE ticket_id = ? AND event_type = ? 
+    WHERE ticket_id = ? AND event_type = ?
       AND acked_at IS NOT NULL
-      AND datetime(created_at) > datetime(?)
-    ORDER BY created_at DESC LIMIT 1
-  `).get(ticketId, eventType, cutoff);
+    ORDER BY acked_at DESC, id DESC LIMIT 1
+  `).get(ticketId, eventType);
   return Boolean(row);
+}
+
+/**
+ * 清理某工单的通知事件历史（状态切换时调用）
+ */
+export function clearNotificationEvents(ticketId) {
+  const database = getDb();
+  const info = database.prepare(`
+    DELETE FROM notification_events WHERE ticket_id = ?
+  `).run(ticketId);
+  return info.changes;
 }

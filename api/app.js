@@ -482,7 +482,14 @@ app.patch('/api/tickets/:id', (req, res) => {
       .slice(0, 100);
   }
   updates.last_update = new Date().toISOString();
+
+  const statusChanged = updates.status !== undefined && updates.status !== ticket.status;
   store.updateTicket(id, updates);
+  if (statusChanged) {
+    // 状态切换后清空历史通知事件，允许新状态版本重新进入通知闭环
+    dispatch.clearNotificationEvents(Number(id));
+  }
+
   const updated = store.getTicketById(id);
   res.json(formatTicketForList(updated));
 });
@@ -495,6 +502,7 @@ app.post('/api/tickets/:id/dispatch', (req, res) => {
   if (!ticket) {
     return res.status(404).json({ error: 'Ticket not found', message: '工单不存在' });
   }
+  const statusChanged = ticket.status !== 'queued';
   store.updateTicket(id, {
     status: 'queued',
     assigned_agent: agent,
@@ -502,6 +510,10 @@ app.post('/api/tickets/:id/dispatch', (req, res) => {
     error: null,
     last_update: new Date().toISOString(),
   });
+  if (statusChanged) {
+    dispatch.clearNotificationEvents(Number(id));
+  }
+
   const updated = store.getTicketById(id);
   res.json(formatTicketForList(updated));
 });
@@ -718,7 +730,7 @@ app.get('/api/notifications/ready', (req, res) => {
     const eventType = ticket.status;
 
     // 检查是否最近已通知（只看已 ack）
-    if (dispatch.hasRecentNotification(ticket.id, eventType, 60)) continue;
+    if (dispatch.hasRecentNotification(ticket.id, eventType)) continue;
 
     // 复用未 ack 事件，避免每次拉 ready 都插入新事件
     let eventId = dispatch.getUnackedNotificationEvent(ticket.id, eventType, ticket.status);

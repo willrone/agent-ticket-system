@@ -689,6 +689,63 @@ describe('ack 兼容路由', () => {
   });
 });
 
+describe('notifications 去重闭环', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('同一状态版本 ack 后不重复；状态切换后可再次通知', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'notify dedupe lifecycle',
+        description: 'Desc',
+        status: 'complete',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+
+    const ticketId = createRes.body.id;
+
+    const readyRes1 = await request(app).get('/api/notifications/ready').expect(200);
+    const first = readyRes1.body.ready.find((x) => x.ticket_id === ticketId);
+    expect(first).toBeDefined();
+
+    await request(app)
+      .post(`/api/notifications/${first.event_id}/ack`)
+      .expect(200);
+
+    // 同状态下，ack 后不应重复出现
+    const readyRes2 = await request(app).get('/api/notifications/ready').expect(200);
+    const repeated = readyRes2.body.ready.find((x) => x.ticket_id === ticketId);
+    expect(repeated).toBeUndefined();
+
+    // 非状态字段更新也不应触发重复通知
+    await request(app)
+      .patch(`/api/tickets/${ticketId}`)
+      .send({ description: 'updated without status change' })
+      .expect(200);
+    const readyRes3 = await request(app).get('/api/notifications/ready').expect(200);
+    const repeatedAfterNonStatusUpdate = readyRes3.body.ready.find((x) => x.ticket_id === ticketId);
+    expect(repeatedAfterNonStatusUpdate).toBeUndefined();
+
+    // 状态切换后，再次进入 complete 时应允许重新通知
+    await request(app)
+      .patch(`/api/tickets/${ticketId}`)
+      .send({ status: 'running' })
+      .expect(200);
+    await request(app)
+      .patch(`/api/tickets/${ticketId}`)
+      .send({ status: 'complete' })
+      .expect(200);
+
+    const readyRes4 = await request(app).get('/api/notifications/ready').expect(200);
+    const second = readyRes4.body.ready.find((x) => x.ticket_id === ticketId);
+    expect(second).toBeDefined();
+    expect(second.event_id).not.toBe(first.event_id);
+  });
+});
+
 describe('workflow_mismatch 字段输出', () => {
   beforeEach(() => {
     ensureCleanStore();
