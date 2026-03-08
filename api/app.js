@@ -657,14 +657,53 @@ app.get('/api/dispatch/ready', (req, res) => {
   res.json({ ready });
 });
 
+function parsePositiveInt(value) {
+  const num = parseInt(value, 10);
+  return Number.isInteger(num) && num > 0 ? num : null;
+}
+
+function resolveDispatchId(req) {
+  return (
+    parsePositiveInt(req.params?.dispatch_id)
+    || parsePositiveInt(req.body?.dispatch_id)
+    || parsePositiveInt(req.body?.id)
+    || parsePositiveInt(req.query?.dispatch_id)
+  );
+}
+
+function resolveNotificationEventId(req) {
+  return (
+    parsePositiveInt(req.params?.event_id)
+    || parsePositiveInt(req.body?.event_id)
+    || parsePositiveInt(req.body?.id)
+    || parsePositiveInt(req.query?.event_id)
+  );
+}
+
 // POST /api/dispatch/:dispatch_id/ack - 确认派发
 app.post('/api/dispatch/:dispatch_id/ack', (req, res) => {
-  const dispatchId = parseInt(req.params.dispatch_id, 10);
-  if (!Number.isInteger(dispatchId) || dispatchId <= 0) {
+  const dispatchId = resolveDispatchId(req);
+  if (!dispatchId) {
     return res.status(400).json({ error: 'Bad request', message: 'dispatch_id 必须是正整数' });
   }
-  dispatch.ackDispatchEvent(dispatchId);
-  res.json({ success: true });
+  const ok = dispatch.ackDispatchEvent(dispatchId);
+  if (!ok) {
+    return res.status(404).json({ error: 'Not found', message: `dispatch_id ${dispatchId} 不存在` });
+  }
+  res.json({ success: true, dispatch_id: dispatchId });
+});
+
+// POST /api/dispatch/ack - 兼容旧调用（body/query 携带 dispatch_id）
+app.post('/api/dispatch/ack', (req, res) => {
+  const dispatchId = resolveDispatchId(req);
+  if (!dispatchId) {
+    return res.status(400).json({ error: 'Bad request', message: 'dispatch_id 必须是正整数' });
+  }
+  const ok = dispatch.ackDispatchEvent(dispatchId);
+  if (!ok) {
+    return res.status(404).json({ error: 'Not found', message: `dispatch_id ${dispatchId} 不存在` });
+  }
+  res.json({ success: true, dispatch_id: dispatchId, compatibility: true });
 });
 
 // GET /api/notifications/ready - 获取待通知结果
@@ -711,12 +750,28 @@ app.get('/api/notifications/ready', (req, res) => {
 
 // POST /api/notifications/:event_id/ack - 确认通知
 app.post('/api/notifications/:event_id/ack', (req, res) => {
-  const eventId = parseInt(req.params.event_id, 10);
-  if (!Number.isInteger(eventId) || eventId <= 0) {
+  const eventId = resolveNotificationEventId(req);
+  if (!eventId) {
     return res.status(400).json({ error: 'Bad request', message: 'event_id 必须是正整数' });
   }
-  dispatch.ackNotificationEvent(eventId);
-  res.json({ success: true });
+  const ok = dispatch.ackNotificationEvent(eventId);
+  if (!ok) {
+    return res.status(404).json({ error: 'Not found', message: `event_id ${eventId} 不存在` });
+  }
+  res.json({ success: true, event_id: eventId });
+});
+
+// POST /api/notifications/ack - 兼容旧调用（body/query 携带 event_id）
+app.post('/api/notifications/ack', (req, res) => {
+  const eventId = resolveNotificationEventId(req);
+  if (!eventId) {
+    return res.status(400).json({ error: 'Bad request', message: 'event_id 必须是正整数' });
+  }
+  const ok = dispatch.ackNotificationEvent(eventId);
+  if (!ok) {
+    return res.status(404).json({ error: 'Not found', message: `event_id ${eventId} 不存在` });
+  }
+  res.json({ success: true, event_id: eventId, compatibility: true });
 });
 
 // 依赖关系 API

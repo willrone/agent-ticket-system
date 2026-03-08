@@ -10,12 +10,14 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import app from './app.js';
 import { _resetDbForTesting } from './store-sqlite.js';
+import { _resetDbForTesting as _resetDispatchForTesting } from './dispatch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DB = path.join(__dirname, 'data', 'test-tickets.db');
 
 function ensureCleanStore() {
   _resetDbForTesting();
+  _resetDispatchForTesting();
   const dir = path.dirname(TEST_DB);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   for (const p of [TEST_DB, `${TEST_DB}-wal`, `${TEST_DB}-shm`]) {
@@ -581,5 +583,171 @@ describe('comments v2', () => {
       .post(`/api/tickets/${ticketId}/comments`)
       .send({ content: 'x', type: 'progress', thread_id: 't'.repeat(300) })
       .expect(400);
+  });
+});
+
+describe('GET /api/dispatch/ready', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('正常 running 工单派给 next_actor（assigned_agent）', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Normal running',
+        description: 'Desc',
+        status: 'running',
+        triage_owner: 'leoss',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    expect(createRes.body.status).toBe('running');
+
+    const res = await request(app).get('/api/dispatch/ready').expect(200);
+    expect(res.body.ready).toBeDefined();
+    expect(res.body.ready.length).toBeGreaterThanOrEqual(1);
+    const item = res.body.ready.find((r) => r.ticket_id === createRes.body.id);
+    expect(item).toBeDefined();
+    expect(item.agent).toBe('donky');
+    expect(item.kind).toBeUndefined(); // 正常单无 kind
+  });
+
+  it('running + decision 评论 => workflow_mismatch 告警，派给 decision_owner', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Mismatch decision',
+        description: 'Desc',
+        status: 'running',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        decision_owner: '荣晖',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+    await request(app)
+      .post(`/api/tickets/${ticketId}/comments`)
+      .send({
+        author: 'donky',
+        content: '需要老大拍板，是否继续推进',
+        type: 'decision',
+      })
+      .expect(201);
+
+    const res = await request(app).get('/api/dispatch/ready').expect(200);
+    const item = res.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(item).toBeDefined();
+    expect(item.kind).toBe('workflow_mismatch');
+    expect(item.agent).toBe('荣晖');
+    expect(item.workflow_mismatch).toBeDefined();
+    expect(item.workflow_mismatch.category).toBe('decision_required');
+    expect(item.workflow_mismatch.recommended_status).toBe('pending_decision');
+    expect(item.workflow_mismatch.reason).toBeDefined();
+    expect(item.message).toContain('workflow_mismatch');
+    expect(item.message).toContain(item.workflow_mismatch.reason);
+  });
+});
+
+describe('ack 兼容路由', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('POST /api/notifications/ack 支持 body.event_id 并可完成去重', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'notify ack compat',
+        description: 'Desc',
+        status: 'complete',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+
+    const readyRes = await request(app).get('/api/notifications/ready').expect(200);
+    const event = readyRes.body.ready.find((x) => x.ticket_id === createRes.body.id);
+    expect(event).toBeDefined();
+
+    await request(app)
+      .post('/api/notifications/ack')
+      .send({ event_id: event.event_id })
+      .expect(200);
+
+    const readyAfterAck = await request(app).get('/api/notifications/ready').expect(200);
+    const sameTicket = readyAfterAck.body.ready.find((x) => x.ticket_id === createRes.body.id);
+    expect(sameTicket).toBeUndefined();
+  });
+
+  it('POST /api/notifications/ack 缺少 event_id 返回 400', async () => {
+    const res = await request(app)
+      .post('/api/notifications/ack')
+      .send({})
+      .expect(400);
+    expect(res.body.message).toContain('event_id');
+  });
+});
+
+describe('workflow_mismatch 字段输出', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('GET /api/tickets 列表含 workflow_mismatch 字段', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'List mismatch',
+        description: 'Desc',
+        status: 'running',
+        triage_owner: 'leoss',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+    await request(app)
+      .patch(`/api/tickets/${ticketId}`)
+      .send({ status: 'running' })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${ticketId}/comments`)
+      .send({ author: 'a', content: '需要老大决策', type: 'decision' })
+      .expect(201);
+
+    const res = await request(app).get('/api/tickets').expect(200);
+    const t = res.body.find((x) => x.id === ticketId);
+    expect(t).toBeDefined();
+    expect(t.workflow_mismatch).toBeDefined();
+    expect(t.workflow_mismatch.category).toBe('decision_required');
+    expect(t.workflow_mismatch.reason).toBeDefined();
+  });
+
+  it('GET /api/tickets/:id 详情含 workflow_mismatch 字段', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Detail mismatch',
+        description: 'Desc',
+        status: 'running',
+        triage_owner: 'leoss',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+    await request(app)
+      .patch(`/api/tickets/${ticketId}`)
+      .send({ status: 'running' })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${ticketId}/comments`)
+      .send({ author: 'a', content: 'token 不足，上下文不够', type: 'blocker' })
+      .expect(201);
+
+    const res = await request(app).get(`/api/tickets/${ticketId}`).expect(200);
+    expect(res.body.workflow_mismatch).toBeDefined();
+    expect(res.body.workflow_mismatch.category).toBe('context_gap');
+    expect(res.body.workflow_mismatch.recommended_status).toBe('review');
+    expect(res.body.workflow_mismatch.reason).toBeDefined();
   });
 });

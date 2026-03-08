@@ -70,8 +70,8 @@ export function ackDispatchEvent(dispatchId) {
   const stmt = database.prepare(`
     UPDATE dispatch_events SET acked_at = ? WHERE id = ?
   `);
-  stmt.run(now, dispatchId);
-  return true;
+  const info = stmt.run(now, dispatchId);
+  return info.changes > 0;
 }
 
 /**
@@ -141,8 +141,8 @@ export function ackNotificationEvent(eventId) {
   const stmt = database.prepare(`
     UPDATE notification_events SET acked_at = ? WHERE id = ?
   `);
-  stmt.run(now, eventId);
-  return true;
+  const info = stmt.run(now, eventId);
+  return info.changes > 0;
 }
 
 /**
