@@ -6,10 +6,10 @@
 
 ```bash
 npm install
-npm run dev      # 前端开发服务
-npm run api      # 后端 API（默认 8788）
-npm test         # 单元测试
-npm run build    # 前端构建
+npm run dev       # 前端开发服务
+npm run dev:api   # 后端 API（默认 8788）
+npm test          # 单元测试
+npm run build     # 前端构建
 ```
 
 ## 存储说明（SQLite only）
@@ -18,6 +18,24 @@ npm run build    # 前端构建
 
 - DB 路径：`data/tickets.db`
 - 可通过环境变量覆盖：`TICKETS_DB_PATH`
+
+## 内置轮询线程（替代外部 cron）
+
+`npm run dev:api` 启动后会内置启动 2 个轮询线程：
+
+1. **dispatch poller**（默认 5 分钟）
+   - 检测 `/api/dispatch/ready`
+   - 有事件时唤醒 `agent:auditor:main`（Sheeply）执行派单
+2. **notify poller**（默认 2 分钟）
+   - 检测 `/api/notifications/ready`
+   - 有事件时唤醒 `agent:auditor:main`（Sheeply）执行结果通知
+
+### 相关环境变量
+
+- `TICKET_INTERNAL_POLLERS_ENABLED`：是否启用内置轮询（默认 `true`）
+- `TICKET_SHEEPLY_SESSION_KEY`：Sheeply 会话 key（默认 `agent:auditor:main`）
+- `TICKET_DISPATCH_POLL_INTERVAL_MS`：dispatch 轮询间隔（默认 `300000`）
+- `TICKET_NOTIFY_POLL_INTERVAL_MS`：notify 轮询间隔（默认 `120000`）
 
 ## 评论增强 v2 API
 

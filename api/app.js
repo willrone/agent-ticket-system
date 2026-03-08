@@ -15,6 +15,8 @@ import {
 } from '../constants/comments.js';
 import { normalizeCommentShape, buildCommentId } from './comment-utils.js';
 import { DEFAULT_TRIAGE_OWNER, TICKET_STATUSES, enrichTicketRouting } from './ticket-routing.js';
+import { detectWorkflowMismatch } from './workflow-mismatch.js';
+import * as dispatch from './dispatch.js';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -54,12 +56,14 @@ function normalizeParentTicketId(value) {
 
 function formatTicketForList(t) {
   const ticket = enrichTicketRouting(t);
+  const workflow_mismatch = detectWorkflowMismatch(ticket);
   return {
     ...ticket,
     bot: ticket.assigned_agent,
     created: ticket.created || ticket.last_update,
     priority: ticket.priority || 'medium',
     progress: ticket.status === 'done' ? 100 : ticket.status === 'review' ? 80 : ticket.status === 'running' ? 50 : ticket.status === 'triage' ? 10 : 0,
+    workflow_mismatch: workflow_mismatch || undefined,
   };
 }
 
@@ -259,6 +263,7 @@ app.get('/api/tickets/:id', (req, res) => {
     return res.status(404).json({ error: 'Ticket not found', message: '工单不存在' });
   }
   const enriched = enrichTicketRouting(ticket);
+  const workflow_mismatch = detectWorkflowMismatch(enriched);
   const detail = {
     ...enriched,
     updated: enriched.updated || enriched.last_update,
@@ -268,6 +273,7 @@ app.get('/api/tickets/:id', (req, res) => {
     attachments: [],
     watchers: enriched.watchers || [],
     comments: (enriched.comments || []).map(normalizeComment),
+    workflow_mismatch: workflow_mismatch || undefined,
   };
   res.json(detail);
 });
@@ -573,6 +579,197 @@ app.post('/api/tickets/batch-delete', (req, res) => {
   }
   const count = store.deleteTickets(ids);
   res.json({ deleted: count });
+});
+
+// GET /api/dispatch/ready - 获取待派发工单
+app.get('/api/dispatch/ready', (req, res) => {
+  const allTickets = store.getAllTickets().map(enrichTicketRouting);
+
+  // 构建候选：正常单 (next_actor) + mismatch 单 (alert_target)
+  const candidates = [];
+  for (const ticket of allTickets) {
+    const mismatch = detectWorkflowMismatch(ticket);
+    if (mismatch) {
+      const agent = mismatch.alert_target || '荣晖';
+      if (!agent) continue;
+      candidates.push({ ticket, agent, kind: 'workflow_mismatch', mismatch });
+    } else if (ticket.should_notify && ticket.next_actor) {
+      // 依赖门禁：检查是否有未满足的依赖
+      if (store.hasUnmetDependencies(ticket.id)) {
+        console.log(`[dispatch/ready] Skip #${ticket.id}: unmet dependencies`);
+        continue;
+      }
+      candidates.push({ ticket, agent: ticket.next_actor, kind: undefined, mismatch: null });
+    }
+  }
+
+  console.log('[dispatch/ready] Candidates:', candidates.length);
+
+  // 按 agent 分组，每个 agent 只返回最早 1 张
+  const byAgent = new Map();
+  for (const { ticket, agent, kind, mismatch } of candidates) {
+    console.log(`[dispatch/ready] Checking #${ticket.id} agent=${agent} kind=${kind || 'normal'}`);
+    const statusKey = kind === 'workflow_mismatch' ? 'workflow_mismatch' : ticket.status;
+    const hasRecent = dispatch.hasRecentDispatch(ticket.id, agent, statusKey, 60);
+    if (hasRecent) continue;
+
+    const existing = byAgent.get(agent);
+    if (!existing || Date.parse(ticket.created) < Date.parse(existing.ticket.created)) {
+      byAgent.set(agent, { ticket, agent, kind, mismatch });
+    }
+  }
+
+  // 生成派发事件并返回
+  const ready = [];
+  for (const { ticket, agent, kind, mismatch } of byAgent.values()) {
+    const statusKey = kind === 'workflow_mismatch' ? 'workflow_mismatch' : ticket.status;
+    let dispatchId = dispatch.getUnackedDispatchEvent(ticket.id, agent, statusKey);
+    if (!dispatchId) {
+      dispatchId = dispatch.recordDispatchEvent(ticket.id, agent, statusKey);
+    }
+
+    if (kind === 'workflow_mismatch') {
+      const alertMsg = mismatch.reason || '状态与评论不一致';
+      ready.push({
+        dispatch_id: dispatchId,
+        agent,
+        ticket_id: ticket.id,
+        title: ticket.title,
+        status: ticket.status,
+        next_actor: agent,
+        kind: 'workflow_mismatch',
+        workflow_mismatch: mismatch,
+        message: `⚠️ [workflow_mismatch 告警]\n\n#${ticket.id} ${ticket.title}\n状态：${ticket.status}（running）与最新评论类型不一致\n${alertMsg}\n推荐状态：${mismatch.recommended_status}\n请核实并手动调整工单状态。`,
+      });
+    } else {
+      ready.push({
+        dispatch_id: dispatchId,
+        agent,
+        ticket_id: ticket.id,
+        title: ticket.title,
+        status: ticket.status,
+        next_actor: ticket.next_actor,
+        message: `🔔 你有 1 个当前阶段待处理工单\n\n#${ticket.id} ${ticket.title}\n状态：${ticket.status}\n当前责任人：${agent}\n\n请立即使用 ticket-handler skill 处理，并把【当前阶段】自行闭环推进到【下一阶段】。不要等老大再追问。若遇到需要老大决策的关键问题，先写工单评论，再主动通知老大。`,
+      });
+    }
+  }
+
+  res.json({ ready });
+});
+
+// POST /api/dispatch/:dispatch_id/ack - 确认派发
+app.post('/api/dispatch/:dispatch_id/ack', (req, res) => {
+  const dispatchId = parseInt(req.params.dispatch_id, 10);
+  if (!Number.isInteger(dispatchId) || dispatchId <= 0) {
+    return res.status(400).json({ error: 'Bad request', message: 'dispatch_id 必须是正整数' });
+  }
+  dispatch.ackDispatchEvent(dispatchId);
+  res.json({ success: true });
+});
+
+// GET /api/notifications/ready - 获取待通知结果
+app.get('/api/notifications/ready', (req, res) => {
+  const NOTIFY_STATUSES = new Set(['complete', 'failed', 'pending_decision']);
+  const tickets = store.getAllTickets()
+    .map(enrichTicketRouting)
+    .filter(t => NOTIFY_STATUSES.has(t.status));
+
+  const ready = [];
+  for (const ticket of tickets) {
+    const eventType = ticket.status;
+
+    // 检查是否最近已通知（只看已 ack）
+    if (dispatch.hasRecentNotification(ticket.id, eventType, 60)) continue;
+
+    // 复用未 ack 事件，避免每次拉 ready 都插入新事件
+    let eventId = dispatch.getUnackedNotificationEvent(ticket.id, eventType, ticket.status);
+    if (!eventId) {
+      eventId = dispatch.recordNotificationEvent(ticket.id, eventType, ticket.status);
+    }
+
+    let message = '';
+    if (eventType === 'complete') {
+      message = `✅ 工单已完成\n\n#${ticket.id} ${ticket.title}\n结果：${ticket.result_summary || '已完成'}`;
+    } else if (eventType === 'failed') {
+      message = `❌ 工单失败\n\n#${ticket.id} ${ticket.title}\n错误：${ticket.error || '执行失败'}`;
+    } else if (eventType === 'pending_decision') {
+      message = `⏸️ 工单等待决策\n\n#${ticket.id} ${ticket.title}\n决策摘要：${ticket.decision_summary || '需要老大决策'}`;
+    }
+    
+    ready.push({
+      event_id: eventId,
+      type: eventType,
+      ticket_id: ticket.id,
+      title: ticket.title,
+      status: ticket.status,
+      message,
+    });
+  }
+
+  res.json({ ready });
+});
+
+// POST /api/notifications/:event_id/ack - 确认通知
+app.post('/api/notifications/:event_id/ack', (req, res) => {
+  const eventId = parseInt(req.params.event_id, 10);
+  if (!Number.isInteger(eventId) || eventId <= 0) {
+    return res.status(400).json({ error: 'Bad request', message: 'event_id 必须是正整数' });
+  }
+  dispatch.ackNotificationEvent(eventId);
+  res.json({ success: true });
+});
+
+// 依赖关系 API
+// POST /api/tickets/:id/dependencies - 添加依赖
+app.post('/api/tickets/:id/dependencies', (req, res) => {
+  const ticketId = parseInt(req.params.id, 10);
+  const { depends_on_ticket_id, dependency_type } = req.body;
+  
+  if (!Number.isInteger(ticketId) || ticketId <= 0) {
+    return res.status(400).json({ error: 'Bad request', message: 'ticket_id 必须是正整数' });
+  }
+  
+  if (!depends_on_ticket_id || !Number.isInteger(depends_on_ticket_id) || depends_on_ticket_id <= 0) {
+    return res.status(400).json({ error: 'Bad request', message: 'depends_on_ticket_id 必须是正整数' });
+  }
+  
+  const success = store.addDependency(ticketId, depends_on_ticket_id, dependency_type || 'blocks');
+  if (!success) {
+    return res.status(409).json({ error: 'Conflict', message: '依赖关系已存在' });
+  }
+  
+  res.json({ success: true });
+});
+
+// DELETE /api/tickets/:id/dependencies/:depends_on_id - 删除依赖
+app.delete('/api/tickets/:id/dependencies/:depends_on_id', (req, res) => {
+  const ticketId = parseInt(req.params.id, 10);
+  const dependsOnId = parseInt(req.params.depends_on_id, 10);
+  
+  if (!Number.isInteger(ticketId) || ticketId <= 0 || !Number.isInteger(dependsOnId) || dependsOnId <= 0) {
+    return res.status(400).json({ error: 'Bad request', message: 'ticket_id 和 depends_on_id 必须是正整数' });
+  }
+  
+  const success = store.removeDependency(ticketId, dependsOnId);
+  if (!success) {
+    return res.status(404).json({ error: 'Not found', message: '依赖关系不存在' });
+  }
+  
+  res.json({ success: true });
+});
+
+// GET /api/tickets/:id/dependencies - 获取工单的依赖
+app.get('/api/tickets/:id/dependencies', (req, res) => {
+  const ticketId = parseInt(req.params.id, 10);
+  
+  if (!Number.isInteger(ticketId) || ticketId <= 0) {
+    return res.status(400).json({ error: 'Bad request', message: 'ticket_id 必须是正整数' });
+  }
+  
+  const dependencies = store.getDependencies(ticketId);
+  const dependents = store.getDependents(ticketId);
+  
+  res.json({ dependencies, dependents });
 });
 
 export { app };
