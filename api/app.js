@@ -18,6 +18,7 @@ import { DEFAULT_TRIAGE_OWNER, TICKET_STATUSES, enrichTicketRouting } from './ti
 import { detectWorkflowMismatch } from './workflow-mismatch.js';
 import * as dispatch from './dispatch.js';
 import { transition, getAvailableActions } from './state-machine.js';
+import { broadcastTicketStatusChanged, broadcastTicketComment } from './websocket.js';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -868,6 +869,12 @@ app.post('/api/tickets/:id/transition', (req, res) => {
 
   if (!result.success) {
     return res.status(400).json(result);
+  }
+
+  // 广播状态变化
+  const oldStatus = store.getTicketById(id)?.status;
+  if (oldStatus && oldStatus !== result.ticket.status) {
+    broadcastTicketStatusChanged(result.ticket, oldStatus, result.ticket.status);
   }
 
   // 如果提供了 comment，自动添加系统评论
