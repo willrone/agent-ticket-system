@@ -224,11 +224,11 @@ export function transition(ticketId, action, context = {}) {
   store.updateTicket(ticketId, updates);
 
   // 清空该工单的旧 notification events（状态变了，旧通知作废）
-  store.clearNotificationEventsByTicket(ticketId);
+  dispatch.clearNotificationEvents(ticketId);
 
   // 如果有新的 next_actor，创建 dispatch event
   if (updates.next_actor) {
-    dispatch.createDispatchEvent(ticketId, updates.next_actor, updates.status);
+    dispatch.recordDispatchEvent(ticketId, updates.next_actor, updates.status);
   }
 
   const updatedTicket = store.getTicketById(ticketId);

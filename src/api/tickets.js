@@ -140,3 +140,41 @@ export function removeTicketDependency(ticketId, dependsOnTicketId) {
   });
 }
 
+// --- Compatibility helpers for newer pages ---
+export function getTicket(ticketId) {
+  return fetchTicketDetail(ticketId);
+}
+
+export function getTicketActions(ticketId) {
+  return apiRequest(`/api/tickets/${ticketId}/actions`);
+}
+
+export function transitionTicket(ticketId, payload) {
+  return apiRequest(`/api/tickets/${ticketId}/transition`, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function addComment(ticketId, contentOrPayload, author = 'Current User', options = {}) {
+  if (typeof contentOrPayload === 'object' && contentOrPayload !== null) {
+    return apiRequest(`/api/tickets/${ticketId}/comments`, {
+      method: 'POST',
+      body: {
+        content: String(contentOrPayload.content || '').trim(),
+        author: contentOrPayload.author || author,
+        type: contentOrPayload.type || options.type || 'progress',
+        visibility: contentOrPayload.visibility || options.visibility || 'internal',
+        thread_id: contentOrPayload.thread_id || options.thread_id || null,
+        mentions: Array.isArray(contentOrPayload.mentions)
+          ? contentOrPayload.mentions
+          : Array.isArray(options.mentions)
+            ? options.mentions
+            : [],
+      },
+    });
+  }
+
+  return submitComment(ticketId, contentOrPayload, author, options);
+}
+

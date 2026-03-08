@@ -172,6 +172,8 @@ function rowToTicket(row, comments = [], relations = {}) {
     result_summary: row.result_summary,
     error: row.error,
     watchers: parseJsonArray(row.watchers_json),
+    locked_by: row.locked_by ?? null,
+    locked_at: row.locked_at ?? null,
     comments: comments.map((c) => normalizeCommentShape(c)),
   };
 }
@@ -239,9 +241,11 @@ export function createTicket(ticket) {
       last_update,
       result_summary,
       error,
-      watchers_json
+      watchers_json,
+      locked_by,
+      locked_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const info = stmt.run(
     ticket.title ?? '',
@@ -269,7 +273,9 @@ export function createTicket(ticket) {
     ticket.last_update ?? now,
     ticket.result_summary ?? null,
     ticket.error ?? null,
-    JSON.stringify(Array.isArray(ticket.watchers) ? ticket.watchers : [])
+    JSON.stringify(Array.isArray(ticket.watchers) ? ticket.watchers : []),
+    ticket.locked_by ?? null,
+    ticket.locked_at ?? null
   );
   const id = info.lastInsertRowid;
   const comments = ticket.comments || [];
@@ -309,7 +315,7 @@ export function updateTicket(id, updates) {
     'title', 'description', 'status', 'triage_owner', 'review_owner', 'decision_owner', 'decision_summary', 'decision_context', 'assigned_agent', 'next_actor', 'priority',
     'platform', 'request_type', 'triage_summary', 'implementation_scope',
     'deliverables', 'acceptance_criteria', 'parent_ticket_id',
-    'session_key', 'run_id', 'result_summary', 'error', 'last_update'
+    'session_key', 'run_id', 'result_summary', 'error', 'last_update', 'locked_by', 'locked_at'
   ];
   const mappedAllowed = {
     constraints: 'constraints_text',

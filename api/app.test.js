@@ -249,11 +249,23 @@ describe('GET /api/notifications/summary', () => {
       .expect(201);
     await request(app)
       .post(`/api/tickets/${completeRes.body.id}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${completeRes.body.id}/transition`)
+      .send({
+        action: 'submit_for_review',
+        actor: 'beavy',
+        result_summary: '已完成并关单'
+      })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${completeRes.body.id}/transition`)
       .send({
         action: 'approve',
-        actor: 'leoss',
-        result_summary: '已完成并关单'
-      });
+        actor: 'leoss'
+      })
+      .expect(200);
 
     const failedRes = await request(app)
       .post('/api/tickets')
@@ -267,11 +279,16 @@ describe('GET /api/notifications/summary', () => {
       .expect(201);
     await request(app)
       .post(`/api/tickets/${failedRes.body.id}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${failedRes.body.id}/transition`)
       .send({
         action: 'fail',
         actor: 'beavy',
         error: '测试失败'
-      });
+      })
+      .expect(200);
 
     const decisionRes = await request(app)
       .post('/api/tickets')
@@ -285,8 +302,19 @@ describe('GET /api/notifications/summary', () => {
       })
       .expect(201);
     await request(app)
-      .patch(`/api/tickets/${decisionRes.body.id}`)
-      .send({ status: 'pending_decision', decision_summary: '需要老大拍板' })
+      .post(`/api/tickets/${decisionRes.body.id}/transition`)
+      .send({
+        action: 'start_work',
+        actor: 'beavy'
+      })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${decisionRes.body.id}/transition`)
+      .send({
+        action: 'request_decision',
+        actor: 'beavy',
+        decision_summary: '需要老大拍板'
+      })
       .expect(200);
 
     const res = await request(app)
@@ -316,12 +344,12 @@ describe('GET /api/notifications/summary', () => {
   });
 });
 
-describe('PATCH /api/tickets/:id', () => {
+describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   beforeEach(() => {
     ensureCleanStore();
   });
 
-  it('更新工单状态为 running', async () => {
+  it('通过 transition API 将工单更新为 running，并写入锁定信息', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
       .send({ title: 'Patch test', description: 'Desc' })
@@ -333,18 +361,29 @@ describe('PATCH /api/tickets/:id', () => {
       .send({
         action: 'start_work',
         actor: 'beavy'
-      });
+      })
+      .expect(200);
 
     expect(res.body.success).toBe(true);
     expect(res.body.ticket.status).toBe('running');
+    expect(res.body.ticket.locked_by).toBe('beavy');
+    expect(res.body.ticket.locked_at).toBeTruthy();
   });
 
-  it('更新工单为 done 并设置 result_summary', async () => {
+  it('通过 transition API 将 running 工单更新为 done 并设置 result_summary', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
       .send({ title: 'Complete test', description: 'Desc' })
       .expect(201);
     const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({
+        action: 'start_work',
+        actor: 'beavy'
+      })
+      .expect(200);
 
     const res = await request(app)
       .post(`/api/tickets/${ticketId}/transition`)
@@ -352,14 +391,17 @@ describe('PATCH /api/tickets/:id', () => {
         action: 'submit_for_review',
         actor: 'beavy',
         result_summary: '任务完成'
-      });
+      })
+      .expect(200);
 
     expect(res.body.success).toBe(true);
     expect(res.body.ticket.status).toBe('done');
     expect(res.body.ticket.result_summary).toBe('任务完成');
+    expect(res.body.ticket.locked_by).toBeNull();
+    expect(res.body.ticket.locked_at).toBeNull();
   });
 
-  it('非法状态值返回 400', async () => {
+  it('非法 action 返回 400', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
       .send({ title: 'Invalid status test', description: 'Desc' })
@@ -372,7 +414,7 @@ describe('PATCH /api/tickets/:id', () => {
       .expect(400);
 
     expect(res.body.error).toContain('Invalid action');
-    expect(res.body.message).toContain('status 非法');
+    expect(res.body.allowed_actions).toContain('start_work');
   });
 
   it('可更新分诊结构化字段并输出责任路由', async () => {
@@ -383,14 +425,13 @@ describe('PATCH /api/tickets/:id', () => {
 
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Patch triage', description: 'Desc', status: 'triage', triage_owner: 'leoss' })
+      .send({ title: 'Patch triage', description: 'Desc', status: 'review', triage_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
     const res = await request(app)
       .patch(`/api/tickets/${ticketId}`)
       .send({
-        status: 'review',
         triage_owner: 'leoss',
         assigned_agent: 'beavy',
         next_actor: 'auditor',
@@ -744,24 +785,31 @@ describe('notifications 去重闭环', () => {
 
     // 状态切换后，再次进入 complete 时应允许重新通知
     await request(app)
+      .post(`/api/tickets/${ticketId}/dispatch`)
+      .send({ agent: 'beavy' })
+      .expect(200);
+    await request(app)
       .post(`/api/tickets/${ticketId}/transition`)
       .send({
         action: 'start_work',
         actor: 'beavy'
-      });
+      })
+      .expect(200);
     await request(app)
       .post(`/api/tickets/${ticketId}/transition`)
       .send({
         action: 'submit_for_review',
         actor: 'beavy',
         result_summary: 'done'
-      });
+      })
+      .expect(200);
     await request(app)
       .post(`/api/tickets/${ticketId}/transition`)
       .send({
         action: 'approve',
         actor: 'leoss'
-      });
+      })
+      .expect(200);
 
     const readyRes4 = await request(app).get('/api/notifications/ready').expect(200);
     const second = readyRes4.body.ready.find((x) => x.ticket_id === ticketId);
@@ -781,15 +829,17 @@ describe('workflow_mismatch 字段输出', () => {
       .send({
         title: 'List mismatch',
         description: 'Desc',
-        status: 'running',
         triage_owner: 'leoss',
         assigned_agent: 'donky',
       })
       .expect(201);
     const ticketId = createRes.body.id;
     await request(app)
-      .patch(`/api/tickets/${ticketId}`)
-      .send({ status: 'running' })
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({
+        action: 'start_work',
+        actor: 'donky'
+      })
       .expect(200);
     await request(app)
       .post(`/api/tickets/${ticketId}/comments`)

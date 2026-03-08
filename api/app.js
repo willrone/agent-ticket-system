@@ -17,7 +17,7 @@ import { normalizeCommentShape, buildCommentId } from './comment-utils.js';
 import { DEFAULT_TRIAGE_OWNER, TICKET_STATUSES, enrichTicketRouting } from './ticket-routing.js';
 import { detectWorkflowMismatch } from './workflow-mismatch.js';
 import * as dispatch from './dispatch.js';
-import { transition, getAvailableActions } from './state-machine.js';
+import { TRANSITIONS, transition, getAvailableActions } from './state-machine.js';
 import { broadcastTicketStatusChanged, broadcastTicketComment } from './websocket.js';
 
 const app = express();
@@ -853,7 +853,7 @@ app.post('/api/tickets/:id/transition', (req, res) => {
     return res.status(400).json({
       error: 'Missing action',
       message: '必须指定 action',
-      available_actions: Object.keys(transition.TRANSITIONS || {})
+      available_actions: Object.keys(TRANSITIONS)
     });
   }
 
@@ -864,6 +864,12 @@ app.post('/api/tickets/:id/transition', (req, res) => {
     });
   }
 
+  const previousTicket = store.getTicketById(id);
+  if (!previousTicket) {
+    return res.status(404).json({ error: 'Ticket not found', message: '工单不存在' });
+  }
+  const oldStatus = previousTicket.status;
+
   // 执行状态转换
   const result = transition(Number(id), action, { actor, ...fields });
 
@@ -872,14 +878,12 @@ app.post('/api/tickets/:id/transition', (req, res) => {
   }
 
   // 广播状态变化
-  const oldStatus = store.getTicketById(id)?.status;
-  if (oldStatus && oldStatus !== result.ticket.status) {
+  if (oldStatus !== result.ticket.status) {
     broadcastTicketStatusChanged(result.ticket, oldStatus, result.ticket.status);
   }
 
   // 如果提供了 comment，自动添加系统评论
   if (comment) {
-    const ticket = result.ticket;
     const newComment = {
       id: buildCommentId(),
       author: actor,
@@ -891,23 +895,19 @@ app.post('/api/tickets/:id/transition', (req, res) => {
       mentions: [],
       metadata: {
         action,
-        from: ticket.status,
+        from: oldStatus,
         to: result.ticket.status
       }
     };
 
-    const comments = Array.isArray(ticket.comments) ? ticket.comments : [];
-    store.updateTicket(id, {
-      comments: [...comments, newComment],
-      last_update: new Date().toISOString()
-    });
+    store.addComment(id, newComment);
   }
 
   const updated = store.getTicketById(id);
   res.json({
     success: true,
     ticket: formatTicketForList(updated),
-    message: `状态已从 ${result.ticket.status} 转换为 ${updated.status}`
+    message: `状态已从 ${oldStatus} 转换为 ${updated.status}`
   });
 });
 

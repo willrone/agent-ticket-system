@@ -27,7 +27,7 @@ const ACTION_COLORS = {
 };
 
 function TicketDetail() {
-  const {  = useParams();
+  const { id } = useParams();
   const navigate = useNavigate();
   const [ticket, setTicket] = useState(null);
   const [availableActions, setAvailableActions] = useState([]);
