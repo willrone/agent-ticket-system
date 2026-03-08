@@ -66,6 +66,8 @@ function initSchema(database) {
       result_summary TEXT,
       error TEXT,
       watchers_json TEXT DEFAULT '[]',
+      locked_by TEXT,
+      locked_at TEXT,
       FOREIGN KEY (parent_ticket_id) REFERENCES tickets(id) ON DELETE SET NULL
     );
     CREATE TABLE IF NOT EXISTS ticket_comments (
@@ -98,6 +100,8 @@ function initSchema(database) {
   ensureColumn(database, 'tickets', 'review_owner', 'TEXT');
   ensureColumn(database, 'tickets', 'next_actor', 'TEXT');
   ensureColumn(database, 'tickets', 'platform', 'TEXT');
+  ensureColumn(database, 'tickets', 'locked_by', 'TEXT');
+  ensureColumn(database, 'tickets', 'locked_at', 'TEXT');
   ensureColumn(database, 'tickets', 'request_type', 'TEXT');
   ensureColumn(database, 'tickets', 'triage_summary', 'TEXT');
   ensureColumn(database, 'tickets', 'implementation_scope', 'TEXT');
