@@ -51,6 +51,24 @@ describe('POST /api/tickets', () => {
     expect(res.body.status).toBe('queued');
   });
 
+  it('创建工单支持进入 triage 并显式返回下一步责任人', async () => {
+    const res = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Need triage',
+        description: 'Desc',
+        status: 'triage',
+        triage_owner: 'leoss',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+
+    expect(res.body.status).toBe('triage');
+    expect(res.body.triage_owner).toBe('leoss');
+    expect(res.body.next_actor).toBe('leoss');
+    expect(res.body.next_actor_source).toBe('triage_owner');
+  });
+
   it('标题为空时返回 400', async () => {
     const res = await request(app)
       .post('/api/tickets')
@@ -59,6 +77,86 @@ describe('POST /api/tickets', () => {
 
     expect(res.body.error).toBe('Bad request');
     expect(res.body.message).toContain('标题');
+  });
+});
+
+describe('GET /api/tickets', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('工单列表按创建时间倒序返回，最新的在前', async () => {
+    await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Older ticket', description: 'Desc' })
+      .expect(201);
+
+    await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Newest ticket', description: 'Desc' })
+      .expect(201);
+
+    const res = await request(app)
+      .get('/api/tickets')
+      .expect(200);
+
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toHaveLength(2);
+    expect(res.body[0].title).toBe('Newest ticket');
+    expect(res.body[1].title).toBe('Older ticket');
+  });
+
+  it('工单列表返回 platform/request_type/责任路由字段', async () => {
+    await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Structured ticket',
+        description: 'Desc',
+        status: 'triage',
+        triage_owner: 'leoss',
+        assigned_agent: 'beavy',
+        platform: 'ticket-platform',
+        request_type: 'feature',
+        triage_summary: '列表页需要可识别。',
+      })
+      .expect(201);
+
+    const res = await request(app)
+      .get('/api/tickets')
+      .expect(200);
+
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toEqual(expect.objectContaining({
+      title: 'Structured ticket',
+      status: 'triage',
+      triage_owner: 'leoss',
+      assigned_agent: 'beavy',
+      next_actor: 'leoss',
+      next_actor_source: 'triage_owner',
+      bot: 'beavy',
+      platform: 'ticket-platform',
+      request_type: 'feature',
+      triage_summary: '列表页需要可识别。',
+    }));
+  });
+
+  it('支持按 status / next_actor 过滤可通知工单', async () => {
+    await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Need triage', description: 'Desc', status: 'triage', triage_owner: 'leoss', assigned_agent: 'beavy' })
+      .expect(201);
+    await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Need execution', description: 'Desc', status: 'queued', triage_owner: 'leoss', assigned_agent: 'beavy' })
+      .expect(201);
+
+    const triageOnly = await request(app)
+      .get('/api/tickets?status=triage&next_actor=leoss&actionable=true')
+      .expect(200);
+
+    expect(triageOnly.body).toHaveLength(1);
+    expect(triageOnly.body[0].title).toBe('Need triage');
+    expect(triageOnly.body[0].next_actor).toBe('leoss');
   });
 });
 
@@ -104,6 +202,112 @@ describe('GET /api/tickets/pull', () => {
   });
 });
 
+describe('GET /api/tickets/:id/status', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('返回状态路由摘要，triage 走 triage_owner', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Need triage', description: 'Desc', status: 'triage', triage_owner: 'leoss', assigned_agent: 'beavy' })
+      .expect(201);
+
+    const res = await request(app)
+      .get(`/api/tickets/${createRes.body.id}/status`)
+      .expect(200);
+
+    expect(res.body).toEqual(expect.objectContaining({
+      status: 'triage',
+      triage_owner: 'leoss',
+      assigned_agent: 'beavy',
+      next_actor: 'leoss',
+      next_actor_source: 'triage_owner',
+      should_notify: true,
+    }));
+  });
+});
+
+
+describe('GET /api/notifications/summary', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('返回 complete / failed / pending_decision 三类通知摘要', async () => {
+    const completeRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Completed ticket',
+        description: 'Desc',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+    await request(app)
+      .patch(`/api/tickets/${completeRes.body.id}`)
+      .send({ status: 'complete', result_summary: '已完成并关单' })
+      .expect(200);
+
+    const failedRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Failed ticket',
+        description: 'Desc',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+    await request(app)
+      .patch(`/api/tickets/${failedRes.body.id}`)
+      .send({ status: 'failed', error: '测试失败' })
+      .expect(200);
+
+    const decisionRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Decision ticket',
+        description: 'Desc',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        decision_owner: '荣晖',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+    await request(app)
+      .patch(`/api/tickets/${decisionRes.body.id}`)
+      .send({ status: 'pending_decision', decision_summary: '需要老大拍板' })
+      .expect(200);
+
+    const res = await request(app)
+      .get('/api/notifications/summary?minutes=180')
+      .expect(200);
+
+    expect(res.body.counts.complete).toBe(1);
+    expect(res.body.counts.failed).toBe(1);
+    expect(res.body.counts.pending_decision).toBe(1);
+    expect(res.body.items.complete[0]).toEqual(expect.objectContaining({
+      id: completeRes.body.id,
+      status: 'complete',
+      result_summary: '已完成并关单',
+      review_owner: 'leoss',
+    }));
+    expect(res.body.items.failed[0]).toEqual(expect.objectContaining({
+      id: failedRes.body.id,
+      status: 'failed',
+      error: '测试失败',
+    }));
+    expect(res.body.items.pending_decision[0]).toEqual(expect.objectContaining({
+      id: decisionRes.body.id,
+      status: 'pending_decision',
+      decision_owner: '荣晖',
+      decision_summary: '需要老大拍板',
+    }));
+  });
+});
+
 describe('PATCH /api/tickets/:id', () => {
   beforeEach(() => {
     ensureCleanStore();
@@ -140,6 +344,92 @@ describe('PATCH /api/tickets/:id', () => {
     expect(res.body.result_summary).toBe('任务完成');
   });
 
+  it('非法状态值返回 400', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Invalid status test', description: 'Desc' })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    const res = await request(app)
+      .patch(`/api/tickets/${ticketId}`)
+      .send({ status: 'completed' })
+      .expect(400);
+
+    expect(res.body.error).toBe('Bad request');
+    expect(res.body.message).toContain('status 非法');
+  });
+
+  it('可更新分诊结构化字段并输出责任路由', async () => {
+    const parentRes = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Parent ticket', description: 'Root' })
+      .expect(201);
+
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Patch triage', description: 'Desc', status: 'triage', triage_owner: 'leoss' })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    const res = await request(app)
+      .patch(`/api/tickets/${ticketId}`)
+      .send({
+        status: 'review',
+        triage_owner: 'leoss',
+        assigned_agent: 'beavy',
+        next_actor: 'auditor',
+        platform: 'ticket-platform',
+        request_type: 'feature',
+        triage_summary: '先完成结构化闭环',
+        implementation_scope: '前后端详情页与接口',
+        constraints: '不引入自动化规则引擎',
+        deliverables: '字段、编辑区、接口',
+        acceptance_criteria: '可保存并供 beavy 理解',
+        parent_ticket_id: parentRes.body.id,
+      })
+      .expect(200);
+
+    expect(res.body.status).toBe('review');
+    expect(res.body.triage_owner).toBe('leoss');
+    expect(res.body.assigned_agent).toBe('beavy');
+    expect(res.body.next_actor).toBe('auditor');
+    expect(res.body.next_actor_source).toBe('next_actor');
+    expect(res.body.platform).toBe('ticket-platform');
+    expect(res.body.request_type).toBe('feature');
+    expect(res.body.parent_ticket_id).toBe(parentRes.body.id);
+  });
+
+  it('非法 request_type 返回 400', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Invalid request type', description: 'Desc' })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    const res = await request(app)
+      .patch(`/api/tickets/${ticketId}`)
+      .send({ request_type: 'oops' })
+      .expect(400);
+
+    expect(res.body.message).toContain('request_type 非法');
+  });
+
+  it('父工单不能指向自身', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Self parent', description: 'Desc' })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    const res = await request(app)
+      .patch(`/api/tickets/${ticketId}`)
+      .send({ parent_ticket_id: ticketId })
+      .expect(400);
+
+    expect(res.body.message).toContain('不能指向自身');
+  });
+
   it('工单不存在时返回 404', async () => {
     await request(app)
       .patch('/api/tickets/99999')
@@ -167,6 +457,8 @@ describe('POST /api/tickets/:id/dispatch', () => {
 
     expect(dispatchRes.body.status).toBe('queued');
     expect(dispatchRes.body.assigned_agent).toBe('donky');
+    expect(dispatchRes.body.next_actor).toBe('donky');
+    expect(dispatchRes.body.next_actor_source).toBe('assigned_agent');
   });
 
   it('dispatch 可指定其他 agent', async () => {
