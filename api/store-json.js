@@ -1,6 +1,6 @@
 /**
  * 工单 JSON 文件持久化
- * 最小字段：id, title, description, status, assigned_agent, session_key, run_id, last_update, result_summary, error, comments
+ * 最小字段：id, title, description, status, assigned_agent, 分诊结构化字段, session_key, run_id, last_update, result_summary, error, comments
  */
 import fs from 'fs';
 import path from 'path';
@@ -69,6 +69,14 @@ export function createTicket(ticket) {
     status: ticket.status || 'queued',
     assigned_agent: ticket.assigned_agent || null,
     priority: ticket.priority || 'medium',
+    platform: ticket.platform || null,
+    request_type: ticket.request_type || null,
+    triage_summary: ticket.triage_summary || '',
+    implementation_scope: ticket.implementation_scope || '',
+    constraints: ticket.constraints || '',
+    deliverables: ticket.deliverables || '',
+    acceptance_criteria: ticket.acceptance_criteria || '',
+    parent_ticket_id: ticket.parent_ticket_id || null,
     session_key: ticket.session_key || null,
     run_id: ticket.run_id || null,
     created: ticket.created || now,

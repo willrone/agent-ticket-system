@@ -6,6 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { describe, it, expect, beforeEach } from 'vitest';
+import Database from 'better-sqlite3';
 import * as store from './store-sqlite.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -100,5 +101,113 @@ describe('store-sqlite', () => {
     expect(withComment?.comments).toHaveLength(1);
     const all = store.getAllTickets();
     expect(all).toHaveLength(1);
+  });
+
+  it('持久化分诊结构化字段与责任路由字段', () => {
+    const created = store.createTicket({
+      title: 'Triage',
+      description: 'Need triage fields',
+      status: 'triage',
+      triage_owner: 'leoss',
+      assigned_agent: 'beavy',
+      next_actor: 'qa-owner',
+      platform: 'ticket-platform',
+      request_type: 'feature',
+      triage_summary: '先完成最小闭环',
+      implementation_scope: '前后端详情页和接口',
+      constraints: '不改复杂状态机',
+      deliverables: '字段、接口、页面',
+      acceptance_criteria: '可填写并保存',
+    });
+
+    expect(created.status).toBe('triage');
+    expect(created.triage_owner).toBe('leoss');
+    expect(created.assigned_agent).toBe('beavy');
+    expect(created.next_actor).toBe('qa-owner');
+    expect(created.platform).toBe('ticket-platform');
+    expect(created.request_type).toBe('feature');
+    expect(created.constraints).toBe('不改复杂状态机');
+  });
+
+
+  it('兼容旧库：缺少 next_actor 列时也能自动补齐并继续创建工单', () => {
+    const legacyDb = path.join(TEST_DIR, `legacy-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const raw = new Database(legacyDb);
+    raw.exec(`
+      CREATE TABLE tickets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'queued',
+        assigned_agent TEXT,
+        priority TEXT DEFAULT 'medium',
+        session_key TEXT,
+        run_id TEXT,
+        created TEXT NOT NULL,
+        last_update TEXT NOT NULL,
+        result_summary TEXT,
+        error TEXT,
+        watchers_json TEXT DEFAULT '[]',
+        platform TEXT,
+        request_type TEXT,
+        triage_summary TEXT,
+        implementation_scope TEXT,
+        constraints_text TEXT,
+        deliverables TEXT,
+        acceptance_criteria TEXT,
+        parent_ticket_id INTEGER,
+        triage_owner TEXT,
+        review_owner TEXT
+      );
+      CREATE TABLE ticket_comments (
+        id INTEGER PRIMARY KEY,
+        ticket_id INTEGER NOT NULL,
+        author TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        content TEXT NOT NULL
+      );
+    `);
+    raw.close();
+
+    process.env.TICKETS_DB_PATH = legacyDb;
+    store._resetDbForTesting();
+
+    const created = store.createTicket({
+      title: 'Legacy schema ticket',
+      description: 'should auto migrate next_actor',
+      status: 'queued',
+      triage_owner: 'leoss',
+      review_owner: 'leoss',
+      assigned_agent: 'beavy',
+      next_actor: 'beavy',
+    });
+
+    expect(created.next_actor).toBe('beavy');
+
+    const verify = new Database(legacyDb, { readonly: true });
+    const cols = verify.prepare('PRAGMA table_info(tickets)').all().map((c) => c.name);
+    verify.close();
+    expect(cols).toContain('next_actor');
+  });
+
+  it('支持基础父子工单关系读取', () => {
+    const parent = store.createTicket({ title: 'Parent', description: 'root' });
+    const child = store.createTicket({
+      title: 'Child',
+      description: 'sub task',
+      parent_ticket_id: parent.id,
+      assigned_agent: 'beavy',
+    });
+
+    const parentDetail = store.getTicketById(parent.id);
+    const childDetail = store.getTicketById(child.id);
+
+    expect(childDetail.parent_ticket_id).toBe(parent.id);
+    expect(childDetail.parent_ticket?.title).toBe('Parent');
+    expect(parentDetail.child_tickets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: child.id, title: 'Child', assigned_agent: 'beavy' }),
+      ])
+    );
   });
 });

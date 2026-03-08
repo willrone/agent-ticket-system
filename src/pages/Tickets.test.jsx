@@ -5,8 +5,40 @@ import Tickets from './Tickets';
 import * as ticketsApi from '../api/tickets';
 
 const mockTickets = [
-  { id: 1, title: 'Login page not loading', status: 'open', priority: 'high', bot: 'cowder', created: '2026-03-05 14:30', progress: 0 },
-  { id: 2, title: 'Database connection timeout', status: 'in-progress', priority: 'critical', bot: 'donky', created: '2026-03-04 09:15', progress: 65 },
+  {
+    id: 1,
+    title: 'Login page not loading',
+    status: 'triage',
+    priority: 'high',
+    bot: 'cowder',
+    triage_owner: 'leoss',
+    assigned_agent: 'cowder',
+    next_actor: 'leoss',
+    next_actor_source: 'triage_owner',
+    platform: 'ticket-platform',
+    request_type: 'bug',
+    triage_summary: '先定位登录页加载失败原因。',
+    created: '2026-03-05T14:30:00.000Z',
+    last_update: '2026-03-05T15:30:00.000Z',
+    progress: 0,
+  },
+  {
+    id: 2,
+    title: 'Database connection timeout',
+    status: 'queued',
+    priority: 'critical',
+    bot: 'beavy',
+    triage_owner: 'leoss',
+    assigned_agent: 'beavy',
+    next_actor: 'beavy',
+    next_actor_source: 'assigned_agent',
+    platform: null,
+    request_type: 'feature',
+    triage_summary: '',
+    created: '2026-03-04T09:15:00.000Z',
+    last_update: '2026-03-06T09:15:00.000Z',
+    progress: 65,
+  },
 ];
 
 const mockBots = [
@@ -20,7 +52,19 @@ const mockBots = [
     currentTask: { id: 2, title: 'Database connection timeout', progress: 65 },
     queue: [{ id: 1, title: 'Login page not loading' }],
     stats: { todayCompleted: 5, avgResponseTime: '2.3min', successRate: 94, uptime: '2d 14h' },
-    recentTasks: [{ id: 12, title: 'Fix authentication bug', status: 'completed', time: '10:30' }],
+    recentTasks: [{ id: 12, title: 'Fix authentication bug', status: 'done', time: '10:30' }],
+  },
+  {
+    name: 'beavy',
+    displayName: '小李',
+    status: 'idle',
+    tokens: '88k/200k',
+    usage: 41,
+    emoji: '🦫',
+    currentTask: null,
+    queue: [],
+    stats: { todayCompleted: 3, avgResponseTime: '2.1min', successRate: 98, uptime: '1d 8h' },
+    recentTasks: [],
   },
   {
     name: 'donky',
@@ -67,8 +111,54 @@ describe('Tickets', () => {
     });
     expect(screen.getAllByText(/Database connection timeout/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByRole('heading', { name: /Tickets/ })).toBeInTheDocument();
+    expect(screen.getAllByText('ticket-platform').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('bug').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole('button', { name: /Assigned Agent/i })).toBeInTheDocument();
+    expect(screen.getByText(/Next Actor/i)).toBeInTheDocument();
+    expect(screen.getAllByText('leoss').length).toBeGreaterThanOrEqual(1);
     expect(ticketsApi.fetchTickets).toHaveBeenCalled();
     expect(ticketsApi.fetchBots).toHaveBeenCalled();
+  });
+
+  it('supports platform / request type / assigned agent filters and quick views', async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <Tickets />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Login page not loading/)).toBeInTheDocument();
+    });
+
+    const getTableRows = () => Array.from(container.querySelectorAll('tbody tr')).map((row) => row.textContent || '');
+
+    fireEvent.change(screen.getByLabelText('按平台筛选'), { target: { value: 'ticket-platform' } });
+    expect(getTableRows()).toEqual(expect.arrayContaining([expect.stringContaining('Login page not loading')]));
+    expect(getTableRows().join('')).not.toContain('Database connection timeout');
+
+    fireEvent.click(screen.getByRole('button', { name: /清空筛选/ }));
+    fireEvent.change(screen.getByLabelText('按需求类型筛选'), { target: { value: 'feature' } });
+    expect(getTableRows()).toEqual(expect.arrayContaining([expect.stringContaining('Database connection timeout')]));
+    expect(getTableRows().join('')).not.toContain('Login page not loading');
+
+    fireEvent.click(screen.getByRole('button', { name: /清空筛选/ }));
+    fireEvent.change(screen.getByLabelText('按执行人筛选'), { target: { value: 'beavy' } });
+    expect(getTableRows()).toEqual(expect.arrayContaining([expect.stringContaining('Database connection timeout')]));
+    expect(getTableRows().join('')).not.toContain('Login page not loading');
+
+    fireEvent.click(screen.getByRole('button', { name: /清空筛选/ }));
+    fireEvent.click(screen.getByRole('button', { name: /只看 beavy/i }));
+    expect(getTableRows()).toEqual(expect.arrayContaining([expect.stringContaining('Database connection timeout')]));
+    expect(getTableRows().join('')).not.toContain('Login page not loading');
+
+    fireEvent.click(screen.getByRole('button', { name: /待分诊/i }));
+    expect(getTableRows()).toEqual(expect.arrayContaining([expect.stringContaining('Login page not loading')]));
+    expect(getTableRows().join('')).not.toContain('Database connection timeout');
+
+    fireEvent.click(screen.getByRole('button', { name: /分诊待补全/i }));
+    expect(getTableRows()).toEqual(expect.arrayContaining([expect.stringContaining('Database connection timeout')]));
+    expect(getTableRows().join('')).not.toContain('Login page not loading');
   });
 
   it('shows error state and retry on fetch failure', async () => {
@@ -126,6 +216,37 @@ describe('Tickets', () => {
     await waitFor(() => {
       expect(screen.getByText(/暂无工单/)).toBeInTheDocument();
     });
+  });
+
+  it('supports sorting by Updated header and shows the last update column', async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <Tickets />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Updated/i })).toBeInTheDocument();
+    });
+
+    const getRows = () => Array.from(container.querySelectorAll('tbody tr'));
+
+    let rows = getRows();
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent + rows[1].textContent).toContain('Login page not loading');
+    expect(rows[0].textContent + rows[1].textContent).toContain('Database connection timeout');
+
+    fireEvent.click(screen.getByRole('button', { name: /Updated/i }));
+
+    rows = getRows();
+    expect(rows[0].textContent).toContain('Database connection timeout');
+    expect(rows[1].textContent).toContain('Login page not loading');
+
+    fireEvent.click(screen.getByRole('button', { name: /Updated/i }));
+
+    rows = getRows();
+    expect(rows[0].textContent).toContain('Login page not loading');
+    expect(rows[1].textContent).toContain('Database connection timeout');
   });
 
   it('keeps dark theme styling for main content', async () => {

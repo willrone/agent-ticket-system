@@ -7,6 +7,7 @@ const OPENCLAW_CLI = process.env.OPENCLAW_CLI || 'openclaw';
 
 // Bot 配置（emoji 和显示名）
 const BOT_CONFIG = {
+  beavy: { emoji: '🦫', displayName: '小李' },
   cowder: { emoji: '🐮', displayName: '小牛' },
   donky: { emoji: '🫏', displayName: '小驴' },
   doggy: { emoji: '🐕', displayName: '小狗' },
@@ -62,40 +63,38 @@ async function fetchAgentSessions() {
 export async function getBots() {
   try {
     const sessions = await fetchAgentSessions();
-    
-    // 按 agent 分组统计
-    const agentStats = {};
-    
+
+    // 按 agent 分组统计，并保留无会话 agent 以便工单明确指派
+    const agentStats = Object.fromEntries(
+      Object.entries(BOT_CONFIG).map(([agentId, config]) => [agentId, {
+        name: agentId,
+        displayName: config.displayName,
+        emoji: config.emoji,
+        sessions: [],
+        totalTokens: 0,
+        contextTokens: 200000,
+      }])
+    );
+
     for (const session of sessions) {
-      const agentId = session.key?.split(':')[1]; // agent:main:main -> main
+      const agentId = session.key?.split(':')[1]; // agent:beavy:main -> beavy
       if (!agentId || !BOT_CONFIG[agentId]) continue;
-      
-      if (!agentStats[agentId]) {
-        agentStats[agentId] = {
-          name: agentId,
-          displayName: BOT_CONFIG[agentId].displayName,
-          emoji: BOT_CONFIG[agentId].emoji,
-          sessions: [],
-          totalTokens: 0,
-          contextTokens: 0,
-        };
-      }
-      
+
       agentStats[agentId].sessions.push(session);
       agentStats[agentId].totalTokens += session.totalTokens || 0;
       agentStats[agentId].contextTokens = session.contextTokens || 200000;
     }
-    
+
     // 转换为前端需要的格式
     const bots = Object.values(agentStats).map((agent) => {
       const hasRecentActivity = agent.sessions.some(
         (s) => Date.now() - s.updatedAt < 5 * 60 * 1000 // 5分钟内有活动
       );
-      
-      const usage = agent.contextTokens > 0 
+
+      const usage = agent.contextTokens > 0
         ? Math.round((agent.totalTokens / agent.contextTokens) * 100)
         : 0;
-      
+
       return {
         name: BOT_CONFIG[agent.name]?.nickname || agent.name,
         displayName: agent.displayName,
@@ -114,13 +113,13 @@ export async function getBots() {
         recentTasks: [], // TODO: 从工单系统获取
       };
     });
-    
+
     return bots;
   } catch (err) {
     console.error('[Bots] 获取状态失败:', err.message);
     // 返回默认的 bot 列表（降级方案）
     return Object.entries(BOT_CONFIG).map(([name, config]) => ({
-      name,
+      name: config.nickname || name,
       displayName: config.displayName,
       status: 'idle',
       tokens: '0k/200k',

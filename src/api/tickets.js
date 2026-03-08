@@ -12,6 +12,13 @@ export function fetchTicketDetail(ticketId) {
   return apiRequest(`/api/tickets/${ticketId}`);
 }
 
+export function updateTicket(ticketId, updates) {
+  return apiRequest(`/api/tickets/${ticketId}`, {
+    method: 'PATCH',
+    body: updates,
+  });
+}
+
 /**
  * 获取工单状态：status/session_key/result_summary/last_update/run_id/assigned_agent/error
  */
@@ -38,10 +45,10 @@ export function fetchTicketComments(ticketId, filters = {}) {
  * @param {string} [params.description] - 工单描述
  * @param {string} [params.agent='donky'] - 派发给的 agent
  */
-export function createTicket({ title, description, agent }) {
+export function createTicket({ title, description, agent, status, triage_owner, next_actor }) {
   return apiRequest('/api/tickets', {
     method: 'POST',
-    body: { title, description, agent },
+    body: { title, description, agent, status, triage_owner, next_actor },
   });
 }
 
@@ -52,6 +59,25 @@ export function dispatchTicket(ticketId, agent = 'donky') {
   return apiRequest(`/api/tickets/${ticketId}/dispatch`, {
     method: 'POST',
     body: { agent },
+  });
+}
+
+/**
+ * 删除工单
+ */
+export function deleteTicket(ticketId) {
+  return apiRequest(`/api/tickets/${ticketId}`, {
+    method: 'DELETE',
+  });
+}
+
+/**
+ * 批量删除工单
+ */
+export function deleteTickets(ticketIds) {
+  return apiRequest('/api/tickets/batch-delete', {
+    method: 'POST',
+    body: { ids: ticketIds },
   });
 }
 
@@ -80,3 +106,37 @@ export async function submitComment(ticketId, content, author = 'Current User', 
   });
   return body;
 }
+
+/**
+ * 获取工单的依赖关系
+ * @param {string|number} ticketId - 工单 ID
+ * @returns {Promise<{dependencies: Array, dependents: Array}>}
+ */
+export function fetchTicketDependencies(ticketId) {
+  return apiRequest(`/api/tickets/${ticketId}/dependencies`);
+}
+
+/**
+ * 添加依赖关系
+ * @param {string|number} ticketId - 工单 ID
+ * @param {string|number} dependsOnTicketId - 依赖的工单 ID
+ * @param {string} [dependencyType='blocks'] - 依赖类型
+ */
+export function addTicketDependency(ticketId, dependsOnTicketId, dependencyType = 'blocks') {
+  return apiRequest(`/api/tickets/${ticketId}/dependencies`, {
+    method: 'POST',
+    body: { depends_on_ticket_id: dependsOnTicketId, dependency_type: dependencyType },
+  });
+}
+
+/**
+ * 删除依赖关系
+ * @param {string|number} ticketId - 工单 ID
+ * @param {string|number} dependsOnTicketId - 依赖的工单 ID
+ */
+export function removeTicketDependency(ticketId, dependsOnTicketId) {
+  return apiRequest(`/api/tickets/${ticketId}/dependencies/${dependsOnTicketId}`, {
+    method: 'DELETE',
+  });
+}
+
