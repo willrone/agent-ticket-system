@@ -2,6 +2,7 @@ import { BrowserRouter as Router, Routes, Route, useLocation, Link } from 'react
 import Dashboard from './pages/Dashboard';
 import Tickets from './pages/Tickets';
 import TicketDetail from './pages/TicketDetail';
+import KanbanBoard from './pages/KanbanBoard';
 import { LayoutDashboard, Ticket, Terminal, Menu, X } from 'lucide-react';
 import { useState } from 'react';
 
@@ -15,6 +16,7 @@ function Sidebar({ isOpen, setIsOpen }) {
   const navItems = [
     { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
     { path: '/tickets', icon: Ticket, label: 'Tickets' },
+    { path: '/kanban', icon: Terminal, label: 'Kanban' },
   ];
 
   return (
