@@ -17,6 +17,7 @@ import { normalizeCommentShape, buildCommentId } from './comment-utils.js';
 import { DEFAULT_TRIAGE_OWNER, TICKET_STATUSES, enrichTicketRouting } from './ticket-routing.js';
 import { detectWorkflowMismatch } from './workflow-mismatch.js';
 import * as dispatch from './dispatch.js';
+import { transition, getAvailableActions } from './state-machine.js';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -424,14 +425,14 @@ app.patch('/api/tickets/:id', (req, res) => {
   } = req.body || {};
   const updates = {};
 
+  // 禁止直接修改 status，必须使用 transition API
   if (status !== undefined) {
-    if (!ALLOWED_TICKET_STATUSES.includes(status)) {
-      return res.status(400).json({
-        error: 'Bad request',
-        message: `status 非法，允许值：${ALLOWED_TICKET_STATUSES.join('/')}`,
-      });
-    }
-    updates.status = status;
+    return res.status(400).json({
+      error: 'Direct status update forbidden',
+      message: '禁止直接修改状态，请使用 POST /api/tickets/:id/transition',
+      hint: 'Use transition API for state changes',
+      available_actions: getAvailableActions(id)
+    });
   }
   if (request_type !== undefined && request_type !== null && request_type !== '' && !ALLOWED_REQUEST_TYPES.includes(request_type)) {
     return res.status(400).json({
@@ -841,3 +842,82 @@ app.get('/api/tickets/:id/dependencies', (req, res) => {
 
 export { app };
 export default app;
+
+// POST /api/tickets/:id/transition - 状态转换接口（强制）
+app.post('/api/tickets/:id/transition', (req, res) => {
+  const id = req.params.id;
+  const { action, actor, comment, ...fields } = req.body || {};
+
+  if (!action) {
+    return res.status(400).json({
+      error: 'Missing action',
+      message: '必须指定 action',
+      available_actions: Object.keys(transition.TRANSITIONS || {})
+    });
+  }
+
+  if (!actor) {
+    return res.status(400).json({
+      error: 'Missing actor',
+      message: '必须指定 actor（执行此操作的 agent）'
+    });
+  }
+
+  // 执行状态转换
+  const result = transition(Number(id), action, { actor, ...fields });
+
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
+
+  // 如果提供了 comment，自动添加系统评论
+  if (comment) {
+    const ticket = result.ticket;
+    const newComment = {
+      id: buildCommentId(),
+      author: actor,
+      timestamp: new Date().toISOString(),
+      content: comment,
+      type: 'status_change',
+      visibility: 'internal',
+      thread_id: null,
+      mentions: [],
+      metadata: {
+        action,
+        from: ticket.status,
+        to: result.ticket.status
+      }
+    };
+
+    const comments = Array.isArray(ticket.comments) ? ticket.comments : [];
+    store.updateTicket(id, {
+      comments: [...comments, newComment],
+      last_update: new Date().toISOString()
+    });
+  }
+
+  const updated = store.getTicketById(id);
+  res.json({
+    success: true,
+    ticket: formatTicketForList(updated),
+    message: `状态已从 ${result.ticket.status} 转换为 ${updated.status}`
+  });
+});
+
+// GET /api/tickets/:id/actions - 获取当前可执行的 actions
+app.get('/api/tickets/:id/actions', (req, res) => {
+  const id = req.params.id;
+  const ticket = store.getTicketById(id);
+  
+  if (!ticket) {
+    return res.status(404).json({ error: 'Ticket not found' });
+  }
+
+  const actions = getAvailableActions(Number(id));
+  res.json({
+    ticket_id: Number(id),
+    current_status: ticket.status,
+    available_actions: actions
+  });
+});
+
