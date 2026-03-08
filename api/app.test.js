@@ -808,16 +808,17 @@ describe('workflow_mismatch 字段输出', () => {
       .send({
         title: 'Detail mismatch',
         description: 'Desc',
-        status: 'running',
         triage_owner: 'leoss',
         assigned_agent: 'donky',
       })
       .expect(201);
     const ticketId = createRes.body.id;
     await request(app)
-      .patch(`/api/tickets/${ticketId}`)
-      .send({ status: 'running' })
-      .expect(200);
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({
+        action: 'start_work',
+        actor: 'donky'
+      });
     await request(app)
       .post(`/api/tickets/${ticketId}/comments`)
       .send({ author: 'a', content: 'token 不足，上下文不够', type: 'blocker' })
