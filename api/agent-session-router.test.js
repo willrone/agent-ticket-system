@@ -3,7 +3,7 @@
  * 平台直驱：agent -> sessionKey 路由
  */
 import { describe, it, expect } from 'vitest';
-import { getSessionKeyForAgent, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
+import { getDispatchSessionKeyForTicket, getSessionKeyForAgent, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
 
 describe('agent-session-router (direct-drive)', () => {
   it('NOTIFY_MAIN_SESSION 为 agent:main:main', () => {
@@ -19,6 +19,12 @@ describe('agent-session-router (direct-drive)', () => {
     expect(getSessionKeyForAgent('leoss')).toBe('agent:main:main');
   });
 
+  it('dispatch 为每张工单生成独立 ticket session', () => {
+    expect(getDispatchSessionKeyForTicket('beavy', 26)).toBe('agent:beavy:ticket:26');
+    expect(getDispatchSessionKeyForTicket('donky', '24')).toBe('agent:donky:ticket:24');
+    expect(getDispatchSessionKeyForTicket('leoss', 31)).toBe('agent:main:ticket:31');
+  });
+
   it('agent 大小写不敏感', () => {
     expect(getSessionKeyForAgent('Beavy')).toBe('agent:beavy:main');
     expect(getSessionKeyForAgent('LEOSS')).toBe('agent:main:main');
@@ -27,6 +33,11 @@ describe('agent-session-router (direct-drive)', () => {
   it('未知 agent（如 workflow_mismatch 荣晖）回退到 agent:main:main', () => {
     expect(getSessionKeyForAgent('荣晖')).toBe('agent:main:main');
     expect(getSessionKeyForAgent('unknown')).toBe('agent:main:main');
+  });
+
+  it('未知 agent 的 dispatch ticket session 回退到 agent:main:ticket:<id>', () => {
+    expect(getDispatchSessionKeyForTicket('荣晖', 26)).toBe('agent:main:ticket:26');
+    expect(getDispatchSessionKeyForTicket('unknown', 9)).toBe('agent:main:ticket:9');
   });
 
   it('空值回退到 NOTIFY_MAIN_SESSION', () => {

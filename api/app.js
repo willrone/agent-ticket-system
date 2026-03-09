@@ -663,7 +663,7 @@ app.get('/api/dispatch/ready', (req, res) => {
         title: ticket.title,
         status: ticket.status,
         next_actor: ticket.next_actor,
-        message: `🔔 你有 1 个当前阶段待处理工单\n\n#${ticket.id} ${ticket.title}\n状态：${ticket.status}\n当前责任人：${agent}\n\n请立即使用 ticket-handler skill 处理，并把【当前阶段】自行闭环推进到【下一阶段】。不要等老大再追问。若遇到需要老大决策的关键问题，先写工单评论，再主动通知老大。`,
+        message: `🔔 你有 1 个当前阶段待处理工单\n\n#${ticket.id} ${ticket.title}\n状态：${ticket.status}\n当前责任人：${agent}\n\n请立即使用 ticket-handler skill 处理，并把【当前阶段】自行闭环推进到【下一阶段】。\n\n重要：为了避免主会话上下文堆积，本单使用独立 ticket session。完成当前阶段前，请先把关键进展/决策/结论写入你自己工作区的 memory/YYYY-MM-DD.md（必要时更新相关长期记忆），再通过 transition API 推进工单状态。\n\n不要等老大再追问。若遇到需要老大决策的关键问题，先写工单评论，再主动通知老大。`,
       });
     }
   }

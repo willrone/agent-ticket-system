@@ -45,13 +45,20 @@ npm run build     # 前端构建
 
 1. **dispatch poller**（默认 5 分钟）
    - 检测 `/api/dispatch/ready`
-   - 按 **agent → sessionKey** 映射（beavy/donky/cowder/doggy/marely/leoss → 各自 `agent:{agent}:main`）直发目标 agent 主会话；未知 agent（如 workflow_mismatch 告警对象）发往 `agent:main:main`
+   - 按 **agent + ticket_id → ticket sessionKey** 直发目标 agent 的独立工单会话，例如：
+     - `beavy + #26 -> agent:beavy:ticket:26`
+     - `donky + #24 -> agent:donky:ticket:24`
+     - `leoss + #31 -> agent:main:ticket:31`
+   - 未知 agent（如 workflow_mismatch 告警对象）回退到 `agent:main:ticket:<ticket_id>`
    - 仅当 OpenClaw `chat.send` 成功（且未超时）时才调用 `/api/dispatch/:id/ack`，超时/错误一律不 ack
+   - 派单文案会显式要求执行会话在推进状态前先把关键进展写入自身工作区记忆，避免主会话不知道发生了什么
 2. **notify poller**（默认 2 分钟）
    - 检测 `/api/notifications/ready`
    - 直发 **agent:main:main**（老大/主会话）；仅 delivery 成功后才 ack 对应 notification 事件
 
 > **Sheeply（agent:auditor:main）** 仅保留工单审计等角色，**不再参与 dispatch/notify 执行链路**。业务判断仍由 `/api/dispatch/ready` 与 `/api/notifications/ready` 的 API 决定；平台只负责按 ready 结果直驱投递与严格 ack。
+>
+> 额外约束：dispatch 不再打到 agent 主会话，而是按 `ticket_id` 进入独立 ticket session。这样能避免 agent 主会话上下文被持续堆爆；同时要求执行会话在完成当前阶段前把关键进展写入共享工作区记忆，让主会话与后续会话都能接上上下文。
 
 ### 相关环境变量
 

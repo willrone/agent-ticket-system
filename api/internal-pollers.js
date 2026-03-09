@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { getSessionKeyForAgent, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
+import { getDispatchSessionKeyForTicket, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
 
 const DEFAULT_API_BASE_URL = process.env.TICKET_API_BASE_URL || 'http://127.0.0.1:8788';
 const DEFAULT_DISPATCH_INTERVAL_MS = parsePositiveInt(process.env.TICKET_DISPATCH_POLL_INTERVAL_MS, 5 * 60 * 1000);
@@ -156,9 +156,9 @@ export function startInternalPollers(options = {}) {
       if (ready.length === 0) return;
 
       for (const item of ready) {
-        const { dispatch_id, agent, message } = item;
+        const { dispatch_id, ticket_id, agent, message } = item;
         if (!dispatch_id || !message) continue;
-        const sessionKey = getSessionKeyForAgent(agent);
+        const sessionKey = getDispatchSessionKeyForTicket(agent, ticket_id);
         const idempotencyKey = makeIdempotencyKey(`dispatch-${dispatch_id}`);
         try {
           await withTimeout(
