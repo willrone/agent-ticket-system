@@ -19,25 +19,26 @@ npm run build     # 前端构建
 - DB 路径：`data/tickets.db`
 - 可通过环境变量覆盖：`TICKETS_DB_PATH`
 
-## 内置轮询线程（替代外部 cron）
+## 内置轮询线程（平台直驱）
 
-`npm run dev:api` / `node api/server.js` 启动后会内置启动 2 个轮询线程：
+`npm run dev:api` / `node api/server.js` 启动后会内置 2 个轮询线程，**由平台直接投递到目标会话**，不再经 Sheeply 中转：
 
 1. **dispatch poller**（默认 5 分钟）
    - 检测 `/api/dispatch/ready`
-   - 有事件时唤醒 `agent:auditor:main`（Sheeply）执行派单
+   - 按 **agent → sessionKey** 映射（beavy/donky/cowder/doggy/marely/leoss → 各自 `agent:{agent}:main`）直发目标 agent 主会话；未知 agent（如 workflow_mismatch 告警对象）发往 `agent:main:main`
+   - 仅当 OpenClaw `chat.send` 成功（且未超时）时才调用 `/api/dispatch/:id/ack`，超时/错误一律不 ack
 2. **notify poller**（默认 2 分钟）
    - 检测 `/api/notifications/ready`
-   - 有事件时唤醒 `agent:auditor:main`（Sheeply）执行结果通知
+   - 直发 **agent:main:main**（老大/主会话）；仅 delivery 成功后才 ack 对应 notification 事件
 
-> 运行口径：**外部 Sheeply cron 已废弃/应保持关闭**。当前唯一正确触发源是平台进程内置的两个 poller；Sheeply 负责被唤醒后消费 ready/ack，不再作为独立定时器存在。
+> **Sheeply（agent:auditor:main）** 仅保留工单审计等角色，**不再参与 dispatch/notify 执行链路**。业务判断仍由 `/api/dispatch/ready` 与 `/api/notifications/ready` 的 API 决定；平台只负责按 ready 结果直驱投递与严格 ack。
 
 ### 相关环境变量
 
 - `TICKET_INTERNAL_POLLERS_ENABLED`：是否启用内置轮询（默认 `true`）
-- `TICKET_SHEEPLY_SESSION_KEY`：Sheeply 会话 key（默认 `agent:auditor:main`）
 - `TICKET_DISPATCH_POLL_INTERVAL_MS`：dispatch 轮询间隔（默认 `300000`）
 - `TICKET_NOTIFY_POLL_INTERVAL_MS`：notify 轮询间隔（默认 `120000`）
+- `TICKET_DELIVERY_TIMEOUT_MS`：单次 chat.send 超时（默认 `30000`），超时则不 ack
 
 ## 评论增强 v2 API
 

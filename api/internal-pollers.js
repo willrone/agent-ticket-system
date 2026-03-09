@@ -1,9 +1,10 @@
 import { spawn } from 'child_process';
+import { getSessionKeyForAgent, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
 
 const DEFAULT_API_BASE_URL = process.env.TICKET_API_BASE_URL || 'http://127.0.0.1:8788';
-const DEFAULT_SHEEPLY_SESSION_KEY = process.env.TICKET_SHEEPLY_SESSION_KEY || 'agent:auditor:main';
 const DEFAULT_DISPATCH_INTERVAL_MS = parsePositiveInt(process.env.TICKET_DISPATCH_POLL_INTERVAL_MS, 5 * 60 * 1000);
 const DEFAULT_NOTIFY_INTERVAL_MS = parsePositiveInt(process.env.TICKET_NOTIFY_POLL_INTERVAL_MS, 2 * 60 * 1000);
+const DEFAULT_DELIVERY_TIMEOUT_MS = parsePositiveInt(process.env.TICKET_DELIVERY_TIMEOUT_MS, 30 * 1000);
 
 function parsePositiveInt(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -23,6 +24,10 @@ function makeIdempotencyKey(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * 调用 OpenClaw chat.send 投递到指定 session。
+ * 仅当进程 exit code 为 0 时 resolve；timeout/error/非 0 均 reject，调用方不得 ack。
+ */
 function sendChatToSession({ sessionKey, message, idempotencyKey }) {
   const params = {
     sessionKey,
@@ -62,6 +67,15 @@ function sendChatToSession({ sessionKey, message, idempotencyKey }) {
   });
 }
 
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms);
+    }),
+  ]);
+}
+
 async function fetchReady(apiBaseUrl, path) {
   const url = `${apiBaseUrl}${path}`;
   const response = await fetch(url, {
@@ -72,6 +86,22 @@ async function fetchReady(apiBaseUrl, path) {
   }
   const data = await response.json();
   return Array.isArray(data?.ready) ? data.ready : [];
+}
+
+async function ackDispatch(apiBaseUrl, dispatchId) {
+  const url = `${apiBaseUrl}/api/dispatch/${dispatchId}/ack`;
+  const res = await fetch(url, { method: 'POST', headers: { accept: 'application/json' } });
+  if (!res.ok) {
+    throw new Error(`ack dispatch ${dispatchId} failed: ${res.status}`);
+  }
+}
+
+async function ackNotification(apiBaseUrl, eventId) {
+  const url = `${apiBaseUrl}/api/notifications/${eventId}/ack`;
+  const res = await fetch(url, { method: 'POST', headers: { accept: 'application/json' } });
+  if (!res.ok) {
+    throw new Error(`ack notification ${eventId} failed: ${res.status}`);
+  }
 }
 
 function createWorker({ name, intervalMs, tick }) {
@@ -114,9 +144,9 @@ export function startInternalPollers(options = {}) {
   }
 
   const apiBaseUrl = options.apiBaseUrl || DEFAULT_API_BASE_URL;
-  const sheeplySessionKey = options.sheeplySessionKey || DEFAULT_SHEEPLY_SESSION_KEY;
   const dispatchIntervalMs = options.dispatchIntervalMs || DEFAULT_DISPATCH_INTERVAL_MS;
   const notifyIntervalMs = options.notifyIntervalMs || DEFAULT_NOTIFY_INTERVAL_MS;
+  const deliveryTimeoutMs = options.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
 
   const dispatchWorker = createWorker({
     name: 'dispatch',
@@ -125,25 +155,23 @@ export function startInternalPollers(options = {}) {
       const ready = await fetchReady(apiBaseUrl, '/api/dispatch/ready');
       if (ready.length === 0) return;
 
-      const ids = ready.map((item) => item.dispatch_id).filter(Boolean);
-      const message = [
-        '🛰️ [ticket-platform internal dispatch poller]',
-        `检测到待派单事件：${ready.length} 条`,
-        ids.length ? `dispatch_ids: ${ids.join(',')}` : null,
-        '',
-        '请立即按最新规则处理 /api/dispatch/ready：',
-        '1) 向目标 agent 派单',
-        '2) 派单成功后 ack 对应 dispatch 事件',
-        '3) 异常时回报 leoss',
-      ].filter(Boolean).join('\n');
-
-      await sendChatToSession({
-        sessionKey: sheeplySessionKey,
-        message,
-        idempotencyKey: makeIdempotencyKey('ticket-dispatch-poller'),
-      });
-
-      console.log(`[internal-poller:dispatch] nudged Sheeply for ${ready.length} ready event(s)`);
+      for (const item of ready) {
+        const { dispatch_id, agent, message } = item;
+        if (!dispatch_id || !message) continue;
+        const sessionKey = getSessionKeyForAgent(agent);
+        const idempotencyKey = makeIdempotencyKey(`dispatch-${dispatch_id}`);
+        try {
+          await withTimeout(
+            sendChatToSession({ sessionKey, message, idempotencyKey }),
+            deliveryTimeoutMs,
+            'dispatch chat.send',
+          );
+          await ackDispatch(apiBaseUrl, dispatch_id);
+          console.log(`[internal-poller:dispatch] delivered and acked dispatch_id=${dispatch_id} -> ${sessionKey}`);
+        } catch (err) {
+          console.error(`[internal-poller:dispatch] delivery failed for dispatch_id=${dispatch_id}, no ack:`, err?.message || err);
+        }
+      }
     },
   });
 
@@ -154,36 +182,38 @@ export function startInternalPollers(options = {}) {
       const ready = await fetchReady(apiBaseUrl, '/api/notifications/ready');
       if (ready.length === 0) return;
 
-      const ids = ready.map((item) => item.event_id).filter(Boolean);
-      const message = [
-        '📣 [ticket-platform internal notify poller]',
-        `检测到待通知事件：${ready.length} 条`,
-        ids.length ? `event_ids: ${ids.join(',')}` : null,
-        '',
-        '请立即按最新规则处理 /api/notifications/ready：',
-        '1) 给老大发结果通知',
-        '2) 发送成功后 ack 对应 notification 事件',
-        '3) 发送失败不要 ack，保留重试',
-      ].filter(Boolean).join('\n');
-
-      await sendChatToSession({
-        sessionKey: sheeplySessionKey,
-        message,
-        idempotencyKey: makeIdempotencyKey('ticket-notify-poller'),
-      });
-
-      console.log(`[internal-poller:notify] nudged Sheeply for ${ready.length} ready event(s)`);
+      for (const item of ready) {
+        const { event_id, message } = item;
+        if (!event_id || !message) continue;
+        const idempotencyKey = makeIdempotencyKey(`notify-${event_id}`);
+        try {
+          await withTimeout(
+            sendChatToSession({
+              sessionKey: NOTIFY_MAIN_SESSION,
+              message,
+              idempotencyKey,
+            }),
+            deliveryTimeoutMs,
+            'notify chat.send',
+          );
+          await ackNotification(apiBaseUrl, event_id);
+          console.log(`[internal-poller:notify] delivered and acked event_id=${event_id} -> ${NOTIFY_MAIN_SESSION}`);
+        } catch (err) {
+          console.error(`[internal-poller:notify] delivery failed for event_id=${event_id}, no ack:`, err?.message || err);
+        }
+      }
     },
   });
 
   dispatchWorker.start();
   notifyWorker.start();
 
-  console.log('[internal-poller] started', {
+  console.log('[internal-poller] started (direct-drive)', {
     apiBaseUrl,
-    sheeplySessionKey,
     dispatchIntervalMs,
     notifyIntervalMs,
+    deliveryTimeoutMs,
+    notifySession: NOTIFY_MAIN_SESSION,
   });
 
   return {

@@ -10,9 +10,9 @@ const HOST = '127.0.0.1';
 const server = app.listen(PORT, HOST, () => {
   console.log(`API server running at http://${HOST}:${PORT}`);
 
-  // 用平台内轮询替代外部 cron：
-  // - dispatch 线程：检测 /api/dispatch/ready 后唤醒 Sheeply 派单
-  // - notify 线程：检测 /api/notifications/ready 后唤醒 Sheeply 通知
+  // 平台直驱：内置 poller 直接投递到目标 session / agent:main:main，不再经 Sheeply
+  // - dispatch：按 agent -> sessionKey 直发目标 agent 主会话
+  // - notify：直发 agent:main:main
   const pollers = startInternalPollers({
     apiBaseUrl: `http://${HOST}:${PORT}`,
   });

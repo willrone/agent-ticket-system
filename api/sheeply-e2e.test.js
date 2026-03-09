@@ -1,6 +1,6 @@
 /**
  * @vitest-environment node
- * Sheeply ready/ack 端到端闭环测试
+ * Dispatch / Notifications ready/ack 端到端闭环（平台直驱架构：不依赖 Sheeply 中转）
  */
 import './test-setup-sheeply-e2e.js';
 import path from 'path';
@@ -25,7 +25,7 @@ function ensureCleanStore() {
   }
 }
 
-describe('Sheeply ready/ack e2e', () => {
+describe('dispatch/notifications ready/ack e2e (direct-drive)', () => {
   beforeEach(() => {
     ensureCleanStore();
   });
