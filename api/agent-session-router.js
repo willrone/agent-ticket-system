@@ -3,7 +3,14 @@
  * 平台直驱：dispatch 按目标 agent 投递到对应主会话；notify 固定发往 agent:main:main
  */
 
-const KNOWN_AGENTS = new Set(['beavy', 'donky', 'cowder', 'doggy', 'marely', 'leoss']);
+const AGENT_SESSION_KEYS = {
+  beavy: 'agent:beavy:main',
+  donky: 'agent:donky:main',
+  cowder: 'agent:cowder:main',
+  doggy: 'agent:doggy:main',
+  marely: 'agent:marely:main',
+  leoss: 'agent:main:main',
+};
 
 /** 通知目标：老大/主会话（固定） */
 export const NOTIFY_MAIN_SESSION = 'agent:main:main';
@@ -16,6 +23,5 @@ export const NOTIFY_MAIN_SESSION = 'agent:main:main';
 export function getSessionKeyForAgent(agent) {
   if (!agent || typeof agent !== 'string') return NOTIFY_MAIN_SESSION;
   const normalized = String(agent).trim().toLowerCase();
-  if (KNOWN_AGENTS.has(normalized)) return `agent:${normalized}:main`;
-  return NOTIFY_MAIN_SESSION;
+  return AGENT_SESSION_KEYS[normalized] || NOTIFY_MAIN_SESSION;
 }
