@@ -223,8 +223,9 @@ export function transition(ticketId, action, context = {}) {
   // 写入数据库
   store.updateTicket(ticketId, updates);
 
-  // 清空该工单的旧 notification events（状态变了，旧通知作废）
+  // 清空该工单的旧事件（状态变了，旧事件作废）
   dispatch.clearNotificationEvents(ticketId);
+  dispatch.clearDispatchEvents(ticketId);
 
   // 如果有新的 next_actor，创建 dispatch event
   // 例外：pending_decision 只走通知链路，不进入 dispatch ready

@@ -175,6 +175,17 @@ export function clearNotificationEvents(ticketId) {
   return info.changes;
 }
 
+/**
+ * 清理某工单的派单事件历史（状态切换时调用）
+ */
+export function clearDispatchEvents(ticketId) {
+  const database = getDb();
+  const info = database.prepare(`
+    DELETE FROM dispatch_events WHERE ticket_id = ?
+  `).run(ticketId);
+  return info.changes;
+}
+
 // ── Audit Events ──
 
 function ensureAuditTable() {
