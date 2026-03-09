@@ -723,10 +723,10 @@ app.post('/api/dispatch/ack', (req, res) => {
 
 // GET /api/notifications/ready - 获取待通知结果
 app.get('/api/notifications/ready', (req, res) => {
-  const NOTIFY_STATUSES = new Set(['complete', 'failed', 'pending_decision']);
+  const NOTIFY_STATUSES = new Set(['done', 'review', 'complete', 'failed', 'pending_decision']);
   const tickets = store.getAllTickets()
     .map(enrichTicketRouting)
-    .filter(t => NOTIFY_STATUSES.has(t.status));
+    .filter(t => NOTIFY_STATUSES.has(t.status) && t.should_notify);
 
   const ready = [];
   for (const ticket of tickets) {
@@ -748,6 +748,8 @@ app.get('/api/notifications/ready', (req, res) => {
       message = `❌ 工单失败\n\n#${ticket.id} ${ticket.title}\n错误：${ticket.error || '执行失败'}`;
     } else if (eventType === 'pending_decision') {
       message = `⏸️ 工单等待决策\n\n#${ticket.id} ${ticket.title}\n决策摘要：${ticket.decision_summary || '需要老大决策'}`;
+    } else if (eventType === 'done' || eventType === 'review') {
+      message = `📋 工单待验收\n\n#${ticket.id} ${ticket.title}\n结果：${ticket.result_summary || '待验收'}`;
     }
     
     ready.push({

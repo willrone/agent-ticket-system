@@ -2,9 +2,9 @@ import { spawn } from 'child_process';
 import { getDispatchSessionKeyForTicket, getAuditSessionKeyForTicket, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
 
 const DEFAULT_API_BASE_URL = process.env.TICKET_API_BASE_URL || 'http://127.0.0.1:8788';
-const DEFAULT_DISPATCH_INTERVAL_MS = parsePositiveInt(process.env.TICKET_DISPATCH_POLL_INTERVAL_MS, 5 * 60 * 1000);
-const DEFAULT_NOTIFY_INTERVAL_MS = parsePositiveInt(process.env.TICKET_NOTIFY_POLL_INTERVAL_MS, 2 * 60 * 1000);
-const DEFAULT_AUDIT_INTERVAL_MS = parsePositiveInt(process.env.TICKET_AUDIT_POLL_INTERVAL_MS, 10 * 60 * 1000);
+const DEFAULT_DISPATCH_INTERVAL_MS = parsePositiveInt(process.env.TICKET_DISPATCH_POLL_INTERVAL_MS, 5 * 1000);
+const DEFAULT_NOTIFY_INTERVAL_MS = parsePositiveInt(process.env.TICKET_NOTIFY_POLL_INTERVAL_MS, 5 * 1000);
+const DEFAULT_AUDIT_INTERVAL_MS = parsePositiveInt(process.env.TICKET_AUDIT_POLL_INTERVAL_MS, 60 * 1000);
 const DEFAULT_DELIVERY_TIMEOUT_MS = parsePositiveInt(process.env.TICKET_DELIVERY_TIMEOUT_MS, 30 * 1000);
 
 function parsePositiveInt(value, fallback) {
