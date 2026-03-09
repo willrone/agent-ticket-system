@@ -21,7 +21,7 @@ npm run build     # 前端构建
 
 ## 内置轮询线程（替代外部 cron）
 
-`npm run dev:api` 启动后会内置启动 2 个轮询线程：
+`npm run dev:api` / `node api/server.js` 启动后会内置启动 2 个轮询线程：
 
 1. **dispatch poller**（默认 5 分钟）
    - 检测 `/api/dispatch/ready`
@@ -29,6 +29,8 @@ npm run build     # 前端构建
 2. **notify poller**（默认 2 分钟）
    - 检测 `/api/notifications/ready`
    - 有事件时唤醒 `agent:auditor:main`（Sheeply）执行结果通知
+
+> 运行口径：**外部 Sheeply cron 已废弃/应保持关闭**。当前唯一正确触发源是平台进程内置的两个 poller；Sheeply 负责被唤醒后消费 ready/ack，不再作为独立定时器存在。
 
 ### 相关环境变量
 
