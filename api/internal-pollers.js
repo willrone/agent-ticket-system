@@ -4,7 +4,7 @@ import { getDispatchSessionKeyForTicket, getAuditSessionKeyForTicket, NOTIFY_MAI
 const DEFAULT_API_BASE_URL = process.env.TICKET_API_BASE_URL || 'http://127.0.0.1:8788';
 const DEFAULT_DISPATCH_INTERVAL_MS = parsePositiveInt(process.env.TICKET_DISPATCH_POLL_INTERVAL_MS, 5 * 1000);
 const DEFAULT_NOTIFY_INTERVAL_MS = parsePositiveInt(process.env.TICKET_NOTIFY_POLL_INTERVAL_MS, 5 * 1000);
-const DEFAULT_AUDIT_INTERVAL_MS = parsePositiveInt(process.env.TICKET_AUDIT_POLL_INTERVAL_MS, 60 * 1000);
+const DEFAULT_AUDIT_INTERVAL_MS = parsePositiveInt(process.env.TICKET_AUDIT_POLL_INTERVAL_MS, 0); // 已禁用
 const DEFAULT_DELIVERY_TIMEOUT_MS = parsePositiveInt(process.env.TICKET_DELIVERY_TIMEOUT_MS, 30 * 1000);
 
 function parsePositiveInt(value, fallback) {
@@ -244,7 +244,7 @@ export function startInternalPollers(options = {}) {
 
   dispatchWorker.start();
   notifyWorker.start();
-  auditWorker.start();
+  // auditWorker.start(); // 已禁用：Sheeply 只做被动审计，不再主动轮询
 
   console.log('[internal-poller] started (direct-drive)', {
     apiBaseUrl,
