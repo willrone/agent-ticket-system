@@ -19,6 +19,26 @@ npm run build     # 前端构建
 - DB 路径：`data/tickets.db`
 - 可通过环境变量覆盖：`TICKETS_DB_PATH`
 
+## 常驻启动（macOS LaunchAgent）
+
+为了避免手动 `npm run dev:api`，仓库提供了 LaunchAgent 安装脚本：
+
+```bash
+./scripts/install-launchagent.sh
+```
+
+安装后：
+- 服务标签：`ai.openclaw.ticket-platform-api`
+- 会自动常驻拉起 `api/server.js`
+- 默认 DB：`data/tickets.db`
+- 日志路径：`logs/api.out.log` / `logs/api.err.log`
+
+卸载：
+
+```bash
+./scripts/uninstall-launchagent.sh
+```
+
 ## 内置轮询线程（平台直驱）
 
 `npm run dev:api` / `node api/server.js` 启动后会内置 2 个轮询线程，**由平台直接投递到目标会话**，不再经 Sheeply 中转：
