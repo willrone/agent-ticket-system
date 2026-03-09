@@ -11,6 +11,7 @@ import request from 'supertest';
 import app from './app.js';
 import { _resetDbForTesting } from './store-sqlite.js';
 import { _resetDbForTesting as _resetDispatchForTesting } from './dispatch.js';
+import { getAuditSessionKeyForTicket } from './agent-session-router.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DB = path.join(__dirname, 'data', 'test-tickets.db');
@@ -919,5 +920,200 @@ describe('workflow_mismatch 字段输出', () => {
     expect(res.body.workflow_mismatch.category).toBe('context_gap');
     expect(res.body.workflow_mismatch.recommended_status).toBe('review');
     expect(res.body.workflow_mismatch.reason).toBeDefined();
+  });
+});
+
+describe('GET /api/audits/ready', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('running 超过阈值的工单生成 stale_running 审计事件', async () => {
+    const staleTime = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Stale running ticket',
+        description: 'Desc',
+        status: 'running',
+        triage_owner: 'leoss',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    // 手动回拨 last_update 使其超过阈值
+    const { updateTicket } = await import('./store.js');
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const res = await request(app).get('/api/audits/ready').expect(200);
+    expect(res.body.ready).toBeDefined();
+    const item = res.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(item).toBeDefined();
+    expect(item.audit_type).toBe('stale_running');
+    expect(item.stale_minutes).toBeGreaterThanOrEqual(120);
+    expect(item.message).toContain('审计任务');
+    expect(item.message).toContain('不要自动修改工单状态');
+  });
+
+  it('review 超过阈值的工单生成 stale_review 审计事件', async () => {
+    const staleTime = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Stale review ticket',
+        description: 'Desc',
+        status: 'review',
+        triage_owner: 'leoss',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+    const { updateTicket } = await import('./store.js');
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const res = await request(app).get('/api/audits/ready').expect(200);
+    const item = res.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(item).toBeDefined();
+    expect(item.audit_type).toBe('stale_review');
+  });
+
+  it('pending_decision 超过 12h 阈值的工单生成 stale_pending_decision 审计事件', async () => {
+    const staleTime = new Date(Date.now() - 13 * 60 * 60 * 1000).toISOString();
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Stale pending_decision ticket',
+        description: 'Desc',
+        triage_owner: 'leoss',
+        decision_owner: '荣晖',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'request_decision', actor: 'beavy', decision_summary: '需要决策' })
+      .expect(200);
+
+    const { updateTicket } = await import('./store.js');
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const res = await request(app).get('/api/audits/ready').expect(200);
+    const item = res.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(item).toBeDefined();
+    expect(item.audit_type).toBe('stale_pending_decision');
+  });
+
+  it('未超过阈值的工单不出现在 audits/ready 中', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Fresh running ticket',
+        description: 'Desc',
+        status: 'running',
+        triage_owner: 'leoss',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+
+    const res = await request(app).get('/api/audits/ready').expect(200);
+    const item = res.body.ready.find((r) => r.ticket_id === createRes.body.id);
+    expect(item).toBeUndefined();
+  });
+});
+
+describe('POST /api/audits/:id/ack', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('ack 生效后同类审计事件不重复', async () => {
+    const staleTime = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Audit dedup test',
+        description: 'Desc',
+        status: 'running',
+        triage_owner: 'leoss',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+    const { updateTicket } = await import('./store.js');
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const readyRes1 = await request(app).get('/api/audits/ready').expect(200);
+    const first = readyRes1.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(first).toBeDefined();
+
+    await request(app)
+      .post(`/api/audits/${first.audit_id}/ack`)
+      .expect(200);
+
+    const readyRes2 = await request(app).get('/api/audits/ready').expect(200);
+    const repeated = readyRes2.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(repeated).toBeUndefined();
+  });
+
+  it('状态切换后可重新进入审计', async () => {
+    const staleTime = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Audit reset test',
+        description: 'Desc',
+        status: 'running',
+        triage_owner: 'leoss',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+    const { updateTicket } = await import('./store.js');
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const readyRes1 = await request(app).get('/api/audits/ready').expect(200);
+    const first = readyRes1.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(first).toBeDefined();
+    await request(app).post(`/api/audits/${first.audit_id}/ack`).expect(200);
+
+    // dispatch 会重置工单状态并清理审计事件
+    await request(app)
+      .post(`/api/tickets/${ticketId}/dispatch`)
+      .send({ agent: 'donky' })
+      .expect(200);
+
+    // 重新进入 running 并回拨 last_update
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'start_work', actor: 'donky' })
+      .expect(200);
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const readyRes2 = await request(app).get('/api/audits/ready').expect(200);
+    const second = readyRes2.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(second).toBeDefined();
+    expect(second.audit_id).not.toBe(first.audit_id);
+  });
+
+  it('不存在的 audit_id 返回 404', async () => {
+    await request(app)
+      .post('/api/audits/99999/ack')
+      .expect(404);
+  });
+});
+
+describe('audit sessionKey 使用 agent:auditor:audit:<ticket_id> 模式', () => {
+  it('返回正确的 audit session key', () => {
+    expect(getAuditSessionKeyForTicket(26)).toBe('agent:auditor:audit:26');
+    expect(getAuditSessionKeyForTicket(1)).toBe('agent:auditor:audit:1');
+    expect(getAuditSessionKeyForTicket(null)).toBe('agent:auditor:main');
+    expect(getAuditSessionKeyForTicket(0)).toBe('agent:auditor:main');
   });
 });

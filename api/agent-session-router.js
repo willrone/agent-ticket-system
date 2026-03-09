@@ -47,3 +47,14 @@ export function getDispatchSessionKeyForTicket(agent, ticketId) {
   }
   return `${base}:ticket:${normalizedTicketId}`;
 }
+
+/** Sheeply 审计会话：agent:auditor:audit:<ticket_id> */
+export const AUDIT_SESSION_BASE = 'agent:auditor';
+
+export function getAuditSessionKeyForTicket(ticketId) {
+  const normalizedTicketId = Number.parseInt(String(ticketId ?? ''), 10);
+  if (!Number.isFinite(normalizedTicketId) || normalizedTicketId <= 0) {
+    return `${AUDIT_SESSION_BASE}:main`;
+  }
+  return `${AUDIT_SESSION_BASE}:audit:${normalizedTicketId}`;
+}

@@ -28,11 +28,21 @@ describe('internal-pollers (direct-drive)', () => {
     control.stop();
   });
 
-  it('启用时返回可调用的 stop', () => {
+  it('启用时返回可调用的 stop（含 audit worker）', () => {
     process.env.TICKET_INTERNAL_POLLERS_ENABLED = 'true';
     const control = startInternalPollers({ apiBaseUrl: 'http://127.0.0.1:9999' });
     expect(control).toHaveProperty('stop');
     expect(typeof control.stop).toBe('function');
+    control.stop();
+  });
+
+  it('支持自定义 auditIntervalMs', () => {
+    process.env.TICKET_INTERNAL_POLLERS_ENABLED = 'true';
+    const control = startInternalPollers({
+      apiBaseUrl: 'http://127.0.0.1:9999',
+      auditIntervalMs: 60_000,
+    });
+    expect(control).toHaveProperty('stop');
     control.stop();
   });
 });

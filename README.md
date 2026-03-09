@@ -60,12 +60,27 @@ npm run build     # 前端构建
 >
 > 额外约束：dispatch 不再打到 agent 主会话，而是按 `ticket_id` 进入独立 ticket session。这样能避免 agent 主会话上下文被持续堆爆；同时要求执行会话在完成当前阶段前把关键进展写入共享工作区记忆，让主会话与后续会话都能接上上下文。
 
+3. **audit poller**（默认 10 分钟）
+   - 检测 `/api/audits/ready`，识别长期未动工单
+   - 按 `ticket_id` 投递到 Sheeply 独立审计会话：`agent:auditor:audit:<ticket_id>`
+   - Sheeply **仅做审计分析**并将结构化审计结论写回工单评论，不自动修改状态
+   - 仅当 `chat.send` 成功时才 ack，timeout/error 不 ack
+   - 审计触发条件（阈值可通过环境变量配置）：
+     - `running` 超过 2 小时无更新
+     - `review` 超过 2 小时无更新
+     - `pending_decision` 超过 12 小时无更新
+   - 审计事件有去重：同一工单 + 审计类型 ack 后不重复；状态切换后重置
+
 ### 相关环境变量
 
 - `TICKET_INTERNAL_POLLERS_ENABLED`：是否启用内置轮询（默认 `true`）
 - `TICKET_DISPATCH_POLL_INTERVAL_MS`：dispatch 轮询间隔（默认 `300000`）
 - `TICKET_NOTIFY_POLL_INTERVAL_MS`：notify 轮询间隔（默认 `120000`）
+- `TICKET_AUDIT_POLL_INTERVAL_MS`：audit 轮询间隔（默认 `600000`）
 - `TICKET_DELIVERY_TIMEOUT_MS`：单次 chat.send 超时（默认 `30000`），超时则不 ack
+- `AUDIT_STALE_RUNNING_MINUTES`：running 状态审计阈值（默认 `120`，即 2 小时）
+- `AUDIT_STALE_REVIEW_MINUTES`：review 状态审计阈值（默认 `120`，即 2 小时）
+- `AUDIT_STALE_PENDING_DECISION_MINUTES`：pending_decision 状态审计阈值（默认 `720`，即 12 小时）
 
 ## 评论增强 v2 API
 

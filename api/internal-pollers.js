@@ -1,9 +1,10 @@
 import { spawn } from 'child_process';
-import { getDispatchSessionKeyForTicket, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
+import { getDispatchSessionKeyForTicket, getAuditSessionKeyForTicket, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
 
 const DEFAULT_API_BASE_URL = process.env.TICKET_API_BASE_URL || 'http://127.0.0.1:8788';
 const DEFAULT_DISPATCH_INTERVAL_MS = parsePositiveInt(process.env.TICKET_DISPATCH_POLL_INTERVAL_MS, 5 * 60 * 1000);
 const DEFAULT_NOTIFY_INTERVAL_MS = parsePositiveInt(process.env.TICKET_NOTIFY_POLL_INTERVAL_MS, 2 * 60 * 1000);
+const DEFAULT_AUDIT_INTERVAL_MS = parsePositiveInt(process.env.TICKET_AUDIT_POLL_INTERVAL_MS, 10 * 60 * 1000);
 const DEFAULT_DELIVERY_TIMEOUT_MS = parsePositiveInt(process.env.TICKET_DELIVERY_TIMEOUT_MS, 30 * 1000);
 
 function parsePositiveInt(value, fallback) {
@@ -104,6 +105,14 @@ async function ackNotification(apiBaseUrl, eventId) {
   }
 }
 
+async function ackAudit(apiBaseUrl, auditId) {
+  const url = `${apiBaseUrl}/api/audits/${auditId}/ack`;
+  const res = await fetch(url, { method: 'POST', headers: { accept: 'application/json' } });
+  if (!res.ok) {
+    throw new Error(`ack audit ${auditId} failed: ${res.status}`);
+  }
+}
+
 function createWorker({ name, intervalMs, tick }) {
   let timer = null;
   let running = false;
@@ -146,6 +155,7 @@ export function startInternalPollers(options = {}) {
   const apiBaseUrl = options.apiBaseUrl || DEFAULT_API_BASE_URL;
   const dispatchIntervalMs = options.dispatchIntervalMs || DEFAULT_DISPATCH_INTERVAL_MS;
   const notifyIntervalMs = options.notifyIntervalMs || DEFAULT_NOTIFY_INTERVAL_MS;
+  const auditIntervalMs = options.auditIntervalMs || DEFAULT_AUDIT_INTERVAL_MS;
   const deliveryTimeoutMs = options.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
 
   const dispatchWorker = createWorker({
@@ -205,13 +215,42 @@ export function startInternalPollers(options = {}) {
     },
   });
 
+  const auditWorker = createWorker({
+    name: 'audit',
+    intervalMs: auditIntervalMs,
+    tick: async () => {
+      const ready = await fetchReady(apiBaseUrl, '/api/audits/ready');
+      if (ready.length === 0) return;
+
+      for (const item of ready) {
+        const { audit_id, ticket_id, message } = item;
+        if (!audit_id || !message) continue;
+        const sessionKey = getAuditSessionKeyForTicket(ticket_id);
+        const idempotencyKey = makeIdempotencyKey(`audit-${audit_id}`);
+        try {
+          await withTimeout(
+            sendChatToSession({ sessionKey, message, idempotencyKey }),
+            deliveryTimeoutMs,
+            'audit chat.send',
+          );
+          await ackAudit(apiBaseUrl, audit_id);
+          console.log(`[internal-poller:audit] delivered and acked audit_id=${audit_id} -> ${sessionKey}`);
+        } catch (err) {
+          console.error(`[internal-poller:audit] delivery failed for audit_id=${audit_id}, no ack:`, err?.message || err);
+        }
+      }
+    },
+  });
+
   dispatchWorker.start();
   notifyWorker.start();
+  auditWorker.start();
 
   console.log('[internal-poller] started (direct-drive)', {
     apiBaseUrl,
     dispatchIntervalMs,
     notifyIntervalMs,
+    auditIntervalMs,
     deliveryTimeoutMs,
     notifySession: NOTIFY_MAIN_SESSION,
   });
@@ -220,6 +259,7 @@ export function startInternalPollers(options = {}) {
     stop: () => {
       dispatchWorker.stop();
       notifyWorker.stop();
+      auditWorker.stop();
     },
   };
 }

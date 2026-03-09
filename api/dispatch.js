@@ -174,3 +174,75 @@ export function clearNotificationEvents(ticketId) {
   `).run(ticketId);
   return info.changes;
 }
+
+// ── Audit Events ──
+
+function ensureAuditTable() {
+  const database = getDb();
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS audit_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id INTEGER NOT NULL,
+      audit_type TEXT NOT NULL,
+      status_snapshot TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      acked_at TEXT
+    );
+  `);
+}
+
+export function recordAuditEvent(ticketId, auditType, statusSnapshot) {
+  ensureAuditTable();
+  const database = getDb();
+  const now = new Date().toISOString();
+  const info = database.prepare(`
+    INSERT INTO audit_events (ticket_id, audit_type, status_snapshot, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run(ticketId, auditType, statusSnapshot, now);
+  return info.lastInsertRowid;
+}
+
+export function ackAuditEvent(auditId) {
+  ensureAuditTable();
+  const database = getDb();
+  const now = new Date().toISOString();
+  const info = database.prepare(`
+    UPDATE audit_events SET acked_at = ? WHERE id = ?
+  `).run(now, auditId);
+  return info.changes > 0;
+}
+
+/**
+ * 去重：同一 ticket + audit_type 如果已有 acked 事件，不再重复生成。
+ * 只在状态发生变化后（通过 clearAuditEvents）允许重新审计。
+ */
+export function hasRecentAudit(ticketId, auditType) {
+  ensureAuditTable();
+  const database = getDb();
+  const row = database.prepare(`
+    SELECT id FROM audit_events
+    WHERE ticket_id = ? AND audit_type = ? AND acked_at IS NOT NULL
+    ORDER BY acked_at DESC LIMIT 1
+  `).get(ticketId, auditType);
+  return Boolean(row);
+}
+
+export function getUnackedAuditEvent(ticketId, auditType) {
+  ensureAuditTable();
+  const database = getDb();
+  const row = database.prepare(`
+    SELECT id FROM audit_events
+    WHERE ticket_id = ? AND audit_type = ? AND acked_at IS NULL
+    ORDER BY created_at DESC LIMIT 1
+  `).get(ticketId, auditType);
+  return row ? row.id : null;
+}
+
+export function clearAuditEvents(ticketId) {
+  ensureAuditTable();
+  const database = getDb();
+  const info = database.prepare(`
+    DELETE FROM audit_events WHERE ticket_id = ?
+  `).run(ticketId);
+  return info.changes;
+}

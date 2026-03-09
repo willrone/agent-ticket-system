@@ -488,8 +488,8 @@ app.patch('/api/tickets/:id', (req, res) => {
   const statusChanged = updates.status !== undefined && updates.status !== ticket.status;
   store.updateTicket(id, updates);
   if (statusChanged) {
-    // 状态切换后清空历史通知事件，允许新状态版本重新进入通知闭环
     dispatch.clearNotificationEvents(Number(id));
+    dispatch.clearAuditEvents(Number(id));
   }
 
   const updated = store.getTicketById(id);
@@ -514,6 +514,7 @@ app.post('/api/tickets/:id/dispatch', (req, res) => {
   });
   if (statusChanged) {
     dispatch.clearNotificationEvents(Number(id));
+    dispatch.clearAuditEvents(Number(id));
   }
 
   const updated = store.getTicketById(id);
@@ -839,6 +840,120 @@ app.get('/api/tickets/:id/dependencies', (req, res) => {
   const dependents = store.getDependents(ticketId);
   
   res.json({ dependencies, dependents });
+});
+
+// ── Audit API（平台巡检长期未动工单）──
+
+const AUDIT_STALE_RUNNING_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_RUNNING_MINUTES) || 120;
+const AUDIT_STALE_REVIEW_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_REVIEW_MINUTES) || 120;
+const AUDIT_STALE_PENDING_DECISION_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_PENDING_DECISION_MINUTES) || 720;
+
+const AUDIT_THRESHOLDS = {
+  running: AUDIT_STALE_RUNNING_MINUTES,
+  review: AUDIT_STALE_REVIEW_MINUTES,
+  pending_decision: AUDIT_STALE_PENDING_DECISION_MINUTES,
+};
+
+function buildAuditMessage(ticket, auditType, staleMinutes) {
+  const hours = (staleMinutes / 60).toFixed(1);
+  return [
+    `🔍 【审计任务】`,
+    ``,
+    `这是一个平台自动巡检产生的审计任务，不是派单执行任务。`,
+    `请你仅做审计分析，不要自动修改工单状态。`,
+    ``,
+    `## 工单信息`,
+    `- 工单 ID：#${ticket.id}`,
+    `- 标题：${ticket.title}`,
+    `- 当前状态：${ticket.status}`,
+    `- 负责 Agent：${ticket.assigned_agent || '未指定'}`,
+    `- next_actor：${ticket.next_actor || '未指定'}`,
+    `- next_actor_source：${ticket.next_actor_source || '未指定'}`,
+    `- 上次更新：${ticket.last_update}`,
+    `- 滞留时间：${hours} 小时`,
+    `- 审计类型：${auditType}`,
+    ``,
+    `## 审计要求`,
+    `1. 检查该工单最新评论内容和时间`,
+    `2. 确认当前状态是否合理（是否应该已经推进到下一阶段）`,
+    `3. 确认 next_actor 是否正确`,
+    `4. 判断是否卡住、等待外部依赖、或已实际完成但未更新状态`,
+    ``,
+    `## 输出要求`,
+    `请将审计结论以结构化评论写回工单（POST /api/tickets/${ticket.id}/comments），格式如下：`,
+    ``,
+    '```',
+    `【审计结论】workflow_mismatch|stale_running|stale_review|stale_pending_decision|no_issue`,
+    `【建议状态】running|review|pending_decision|blocked|done`,
+    `【建议下一责任人】<agent name>`,
+    `【建议动作】notify_only|manual_review|transition_recommended`,
+    `【原因】<简要说明>`,
+    `【置信度】high|medium|low`,
+    '```',
+    ``,
+    `重要：你只负责审计并写回评论，不要调用 transition API 修改工单状态。`,
+  ].join('\n');
+}
+
+// GET /api/audits/ready
+app.get('/api/audits/ready', (_req, res) => {
+  const allTickets = store.getAllTickets().map(enrichTicketRouting);
+  const now = Date.now();
+
+  const ready = [];
+  for (const ticket of allTickets) {
+    const threshold = AUDIT_THRESHOLDS[ticket.status];
+    if (!threshold) continue;
+
+    const lastUpdateTs = Date.parse(ticket.last_update || '');
+    if (!Number.isFinite(lastUpdateTs)) continue;
+
+    const staleMinutes = (now - lastUpdateTs) / (60 * 1000);
+    if (staleMinutes < threshold) continue;
+
+    const auditType = `stale_${ticket.status}`;
+
+    if (dispatch.hasRecentAudit(ticket.id, auditType)) continue;
+
+    let auditId = dispatch.getUnackedAuditEvent(ticket.id, auditType);
+    if (!auditId) {
+      auditId = dispatch.recordAuditEvent(ticket.id, auditType, ticket.status);
+    }
+
+    ready.push({
+      audit_id: auditId,
+      ticket_id: ticket.id,
+      title: ticket.title,
+      status: ticket.status,
+      audit_type: auditType,
+      stale_minutes: Math.round(staleMinutes),
+      message: buildAuditMessage(ticket, auditType, staleMinutes),
+    });
+  }
+
+  res.json({ ready });
+});
+
+function resolveAuditId(req) {
+  return (
+    parsePositiveInt(req.params?.id)
+    || parsePositiveInt(req.body?.audit_id)
+    || parsePositiveInt(req.body?.id)
+    || parsePositiveInt(req.query?.audit_id)
+  );
+}
+
+// POST /api/audits/:id/ack
+app.post('/api/audits/:id/ack', (req, res) => {
+  const auditId = resolveAuditId(req);
+  if (!auditId) {
+    return res.status(400).json({ error: 'Bad request', message: 'audit_id 必须是正整数' });
+  }
+  const ok = dispatch.ackAuditEvent(auditId);
+  if (!ok) {
+    return res.status(404).json({ error: 'Not found', message: `audit_id ${auditId} 不存在` });
+  }
+  res.json({ success: true, audit_id: auditId });
 });
 
 export { app };
