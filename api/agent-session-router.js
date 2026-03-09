@@ -14,8 +14,8 @@ const AGENT_SESSION_BASES = {
   leoss: 'agent:main',
 };
 
-/** 通知目标：老大/主会话（固定） */
-export const NOTIFY_MAIN_SESSION = 'agent:main:main';
+/** 通知目标：老大/主会话（固定） - 直发 Telegram */
+export const NOTIFY_MAIN_SESSION = 'agent:main:telegram:direct:8290057699';
 
 function getSessionBaseForAgent(agent) {
   if (!agent || typeof agent !== 'string') return 'agent:main';
