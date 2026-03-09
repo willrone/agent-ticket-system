@@ -227,7 +227,8 @@ export function transition(ticketId, action, context = {}) {
   dispatch.clearNotificationEvents(ticketId);
 
   // 如果有新的 next_actor，创建 dispatch event
-  if (updates.next_actor) {
+  // 例外：pending_decision 只走通知链路，不进入 dispatch ready
+  if (updates.next_actor && updates.status !== 'pending_decision') {
     dispatch.recordDispatchEvent(ticketId, updates.next_actor, updates.status);
   }
 

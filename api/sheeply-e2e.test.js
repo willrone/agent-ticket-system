@@ -120,7 +120,7 @@ describe('Sheeply ready/ack e2e', () => {
     expect(notifyReadyAfterAck.body.ready).toHaveLength(0);
   });
 
-  it('打通 pending_decision 通知 ready -> ack 闭环', async () => {
+  it('打通 pending_decision 通知 ready -> ack 闭环（且不进入 dispatch ready）', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
       .send({
@@ -148,6 +148,11 @@ describe('Sheeply ready/ack e2e', () => {
         decision_summary: '实现方向需要老大拍板',
       })
       .expect(200);
+
+    const dispatchReady = await request(app)
+      .get('/api/dispatch/ready')
+      .expect(200);
+    expect(dispatchReady.body.ready.find((item) => item.ticket_id === ticketId)).toBeUndefined();
 
     const notifyReady = await request(app)
       .get('/api/notifications/ready')

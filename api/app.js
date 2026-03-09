@@ -607,7 +607,7 @@ app.get('/api/dispatch/ready', (req, res) => {
       const agent = mismatch.alert_target || '荣晖';
       if (!agent) continue;
       candidates.push({ ticket, agent, kind: 'workflow_mismatch', mismatch });
-    } else if (ticket.should_notify && ticket.next_actor) {
+    } else if (ticket.should_notify && ticket.next_actor && ticket.status !== 'pending_decision') {
       // 依赖门禁：检查是否有未满足的依赖
       if (store.hasUnmetDependencies(ticket.id)) {
         console.log(`[dispatch/ready] Skip #${ticket.id}: unmet dependencies`);

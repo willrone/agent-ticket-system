@@ -702,6 +702,44 @@ describe('GET /api/dispatch/ready', () => {
     expect(item.message).toContain('workflow_mismatch');
     expect(item.message).toContain(item.workflow_mismatch.reason);
   });
+
+  it('pending_decision 不进入 dispatch ready，只进入 notifications ready', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Decision only notify',
+        description: 'Desc',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        decision_owner: '荣晖',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({
+        action: 'request_decision',
+        actor: 'beavy',
+        decision_summary: '需要老大拍板',
+      })
+      .expect(200);
+
+    const dispatchRes = await request(app).get('/api/dispatch/ready').expect(200);
+    expect(dispatchRes.body.ready.find((r) => r.ticket_id === ticketId)).toBeUndefined();
+
+    const notifyRes = await request(app).get('/api/notifications/ready').expect(200);
+    const notifyItem = notifyRes.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(notifyItem).toBeDefined();
+    expect(notifyItem.type).toBe('pending_decision');
+    expect(notifyItem.status).toBe('pending_decision');
+  });
 });
 
 describe('ack 兼容路由', () => {
