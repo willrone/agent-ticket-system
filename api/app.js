@@ -605,7 +605,8 @@ app.get('/api/dispatch/ready', (req, res) => {
   for (const ticket of allTickets) {
     const mismatch = detectWorkflowMismatch(ticket);
     if (mismatch) {
-      const agent = mismatch.alert_target || '荣晖';
+      // workflow_mismatch 告警发给当前责任人，而不是老大
+      const agent = ticket.next_actor || mismatch.alert_target || '荣晖';
       if (!agent) continue;
       candidates.push({ ticket, agent, kind: 'workflow_mismatch', mismatch });
     } else if (ticket.should_notify && ticket.next_actor && ticket.status !== 'pending_decision') {
@@ -654,7 +655,7 @@ app.get('/api/dispatch/ready', (req, res) => {
         next_actor: agent,
         kind: 'workflow_mismatch',
         workflow_mismatch: mismatch,
-        message: `⚠️ [workflow_mismatch 告警]\n\n#${ticket.id} ${ticket.title}\n状态：${ticket.status}（running）与最新评论类型不一致\n${alertMsg}\n推荐状态：${mismatch.recommended_status}\n请核实并手动调整工单状态。`,
+        message: `⚠️ [workflow_mismatch 告警]\n\n#${ticket.id} ${ticket.title}\n当前状态：${ticket.status}\n问题：${alertMsg}\n推荐状态：${mismatch.recommended_status}\n\n请核实工单当前阶段：\n- 如果确实需要决策/授权，请通过 transition API 切到 ${mismatch.recommended_status}\n- 如果仍在正常施工中，可以忽略此告警（评论语义可能被误判）`,
       });
     } else {
       ready.push({
