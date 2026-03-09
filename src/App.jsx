@@ -125,6 +125,7 @@ function App() {
               <Route path="/" element={<Dashboard />} />
               <Route path="/tickets" element={<Tickets />} />
               <Route path="/tickets/:id" element={<TicketDetail />} />
+              <Route path="/kanban" element={<KanbanBoard />} />
             </Routes>
           </main>
         </div>

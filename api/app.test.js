@@ -11,7 +11,7 @@ import request from 'supertest';
 import app from './app.js';
 import { _resetDbForTesting } from './store-sqlite.js';
 import { _resetDbForTesting as _resetDispatchForTesting } from './dispatch.js';
-import { getAuditSessionKeyForTicket } from './agent-session-router.js';
+import { getAuditSessionKeyForTicket, getNotificationSessionKey, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DB = path.join(__dirname, 'data', 'test-tickets.db');
@@ -80,6 +80,68 @@ describe('POST /api/tickets', () => {
 
     expect(res.body.error).toBe('Bad request');
     expect(res.body.message).toContain('标题');
+  });
+});
+
+describe('GET /api/metrics/dashboard', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('返回真实状态口径的 Dashboard 指标与状态分布', async () => {
+    const runningRes = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Running ticket', assigned_agent: 'beavy', triage_owner: 'leoss' })
+      .expect(201);
+
+    await request(app)
+      .post(`/api/tickets/${runningRes.body.id}/transition`)
+      .send({ action: 'start_work', actor: 'beavy', comment: '开始处理' })
+      .expect(200);
+
+    const doneRes = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Done ticket', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .expect(201);
+
+    await request(app)
+      .post(`/api/tickets/${doneRes.body.id}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+
+    await request(app)
+      .post(`/api/tickets/${doneRes.body.id}/transition`)
+      .send({ action: 'submit_for_review', actor: 'beavy', result_summary: 'ready' })
+      .expect(200);
+
+    await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Pending decision ticket', status: 'pending_decision', assigned_agent: 'beavy', triage_owner: 'leoss' })
+      .expect(201);
+
+    await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Complete ticket', status: 'complete', assigned_agent: 'beavy', triage_owner: 'leoss' })
+      .expect(201);
+
+    const res = await request(app)
+      .get('/api/metrics/dashboard')
+      .expect(200);
+
+    expect(res.body.data.stats).toEqual(expect.objectContaining({
+      total: 4,
+      active: 3,
+      inProgress: 1,
+      waitingReview: 1,
+      closed: 1,
+    }));
+
+    expect(res.body.data.statusDistribution).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'running', name: '进行中', value: 1 }),
+      expect.objectContaining({ status: 'done', name: '待验收', value: 1 }),
+      expect.objectContaining({ status: 'pending_decision', name: '待决策', value: 1 }),
+      expect.objectContaining({ status: 'complete', name: '已关单', value: 1 }),
+    ]));
   });
 });
 
@@ -740,6 +802,47 @@ describe('GET /api/dispatch/ready', () => {
     expect(notifyItem).toBeDefined();
     expect(notifyItem.type).toBe('pending_decision');
     expect(notifyItem.status).toBe('pending_decision');
+    expect(notifyItem.target_session_key).toBe(NOTIFY_MAIN_SESSION);
+  });
+
+  it('done/review 通知返回 review_owner 对应的 ticket session，不走主会话', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Review notify target',
+        description: 'Desc',
+        triage_owner: 'leoss',
+        review_owner: 'beavy',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'start_work', actor: 'donky' })
+      .expect(200);
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({
+        action: 'submit_for_review',
+        actor: 'donky',
+        result_summary: 'ready for beavy review',
+      })
+      .expect(200);
+
+    const notifyRes = await request(app).get('/api/notifications/ready').expect(200);
+    const notifyItem = notifyRes.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(notifyItem).toBeDefined();
+    expect(notifyItem.type).toBe('done');
+    expect(notifyItem.target_actor).toBe('beavy');
+    expect(notifyItem.target_session_key).toBe(getNotificationSessionKey({
+      status: 'done',
+      reviewOwner: 'beavy',
+      ticketId,
+    }));
+    expect(notifyItem.target_session_key).not.toBe(NOTIFY_MAIN_SESSION);
   });
 });
 

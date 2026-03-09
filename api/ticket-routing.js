@@ -26,7 +26,7 @@ export function resolveTicketRouting(ticket = {}) {
       next_actor: null,
       next_actor_override: nextActorOverride,
       next_actor_source: null,
-      should_notify: false,
+      should_notify: true,
     };
   }
 

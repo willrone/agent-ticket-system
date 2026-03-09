@@ -1,9 +1,59 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { Search, Plus, Activity, TrendingUp, AlertCircle, Clock, CheckCircle, XCircle, Zap, List, Inbox, RefreshCw, Trash2, ArrowUpDown, ChevronUp, ChevronDown } from 'lucide-react';
-import { fetchTickets, fetchBots, fetchTicketStatus, createTicket, deleteTicket, deleteTickets } from '../api/tickets';
+import { fetchTickets, fetchBots, fetchTicketStatus, createTicket, deleteTicket, deleteTickets, fetchTicketDependencies } from '../api/tickets';
 import LoadingState from '../components/LoadingState';
 import ErrorState from '../components/ErrorState';
+
+// 依赖关系展示组件
+function TicketDependencies({ ticketId }) {
+  const [deps, setDeps] = useState({ dependencies: [], dependents: [] });
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    fetchTicketDependencies(ticketId)
+      .then((data) => {
+        if (mounted) {
+          setDeps(data);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setDeps({ dependencies: [], dependents: [] });
+          setLoading(false);
+        }
+      });
+    return () => { mounted = false; };
+  }, [ticketId]);
+
+  if (loading) {
+    return <span className="text-xs text-[var(--text-secondary)]">...</span>;
+  }
+
+  const depCount = deps.dependencies.length;
+  const depentCount = deps.dependents.length;
+
+  if (depCount === 0 && depentCount === 0) {
+    return <span className="text-xs text-[var(--text-secondary)]">—</span>;
+  }
+
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      {depCount > 0 && (
+        <span className="inline-flex items-center gap-1 px-2 py-1 rounded border border-orange-500/40 bg-orange-500/10 text-orange-300" title={`依赖 ${depCount} 个工单`}>
+          🔗 {depCount}
+        </span>
+      )}
+      {depentCount > 0 && (
+        <span className="inline-flex items-center gap-1 px-2 py-1 rounded border border-blue-500/40 bg-blue-500/10 text-blue-300" title={`被 ${depentCount} 个工单依赖`}>
+          ⬅️ {depentCount}
+        </span>
+      )}
+    </div>
+  );
+}
 
 const DEFAULT_SORT = { key: 'created', direction: 'desc' };
 
@@ -784,6 +834,9 @@ const Tickets = () => {
                         {renderSortIcon('last_update')}
                       </button>
                     </th>
+                    <th className="px-6 py-3 text-left text-xs font-bold text-[var(--accent-primary)] uppercase tracking-wider">
+                      <span>Dependencies</span>
+                    </th>
                     <th className="px-6 py-3 text-left text-xs font-bold text-[var(--accent-primary)] uppercase tracking-wider"></th>
                   </tr>
                 </thead>
@@ -862,6 +915,9 @@ const Tickets = () => {
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-[var(--text-secondary)] font-mono">
                           {formatDateTime(ticket.last_update)}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <TicketDependencies ticketId={ticket.id} />
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <div className="flex items-center gap-2">

@@ -83,12 +83,17 @@ const mockBots = [
 vi.mock('../api/tickets', () => ({
   fetchTickets: vi.fn(),
   fetchBots: vi.fn(),
+  fetchTicketDependencies: vi.fn(),
 }));
 
 describe('Tickets', () => {
   beforeEach(() => {
     vi.mocked(ticketsApi.fetchTickets).mockResolvedValue(mockTickets);
     vi.mocked(ticketsApi.fetchBots).mockResolvedValue(mockBots);
+    vi.mocked(ticketsApi.fetchTicketDependencies).mockResolvedValue({
+      dependencies: [],
+      dependents: [],
+    });
   });
 
   it('shows loading state initially', () => {

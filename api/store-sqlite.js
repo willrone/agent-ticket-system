@@ -40,6 +40,66 @@ function ensureColumn(database, tableName, columnName, columnDef) {
   }
 }
 
+function ensureCounterTable(database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS id_counters (
+      name TEXT PRIMARY KEY,
+      next_value INTEGER NOT NULL
+    );
+  `);
+}
+
+function ensureCounter(database, name, tableName) {
+  ensureCounterTable(database);
+  const maxId = database.prepare(`SELECT COALESCE(MAX(id), 0) AS max_id FROM ${tableName}`).get()?.max_id ?? 0;
+  const existing = database.prepare('SELECT next_value FROM id_counters WHERE name = ?').get(name);
+  if (!existing) {
+    database.prepare('INSERT INTO id_counters (name, next_value) VALUES (?, ?)').run(name, maxId + 1);
+    return;
+  }
+  if (Number(existing.next_value) <= maxId) {
+    database.prepare('UPDATE id_counters SET next_value = ? WHERE name = ?').run(maxId + 1, name);
+  }
+}
+
+function allocateId(database, name, tableName) {
+  ensureCounter(database, name, tableName);
+  const tx = database.transaction(() => {
+    const row = database.prepare('SELECT next_value FROM id_counters WHERE name = ?').get(name);
+    const id = Number(row?.next_value ?? 1);
+    database.prepare('UPDATE id_counters SET next_value = ? WHERE name = ?').run(id + 1, name);
+    return id;
+  });
+  return tx();
+}
+
+function isCommentEarlierThanTicket(commentTimestamp, ticketCreated) {
+  const commentMs = Date.parse(commentTimestamp);
+  const ticketMs = Date.parse(ticketCreated);
+  if (Number.isNaN(commentMs) || Number.isNaN(ticketMs)) {
+    return false;
+  }
+  return commentMs < ticketMs;
+}
+
+function purgeStaleCommentsForReusedTicketIds(database) {
+  const rows = database.prepare(`
+    SELECT c.id
+    FROM ticket_comments c
+    JOIN tickets t ON t.id = c.ticket_id
+    WHERE c.timestamp < t.created
+  `).all();
+
+  if (rows.length === 0) return 0;
+
+  const del = database.prepare('DELETE FROM ticket_comments WHERE id = ?');
+  const run = database.transaction((items) => {
+    for (const row of items) del.run(row.id);
+  });
+  run(rows);
+  return rows.length;
+}
+
 function initSchema(database) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS tickets (
@@ -128,6 +188,9 @@ function initSchema(database) {
     CREATE INDEX IF NOT EXISTS idx_ticket_deps_ticket_id ON ticket_dependencies(ticket_id);
     CREATE INDEX IF NOT EXISTS idx_ticket_deps_depends_on ON ticket_dependencies(depends_on_ticket_id);
   `);
+
+  ensureCounter(database, 'tickets', 'tickets');
+  purgeStaleCommentsForReusedTicketIds(database);
 }
 
 function summarizeTicketRow(row) {
@@ -179,7 +242,7 @@ function rowToTicket(row, comments = [], relations = {}) {
 }
 
 function commentSelectSql() {
-  return `SELECT id, author, timestamp, content, type, visibility, thread_id, mentions_json, notify_targets_json
+  return `SELECT id, ticket_id, author, timestamp, content, type, visibility, thread_id, mentions_json, notify_targets_json
           FROM ticket_comments WHERE ticket_id = ? ORDER BY id`;
 }
 
@@ -188,7 +251,8 @@ export function getAllTickets() {
   const rows = database.prepare('SELECT * FROM tickets ORDER BY id').all();
   const tickets = [];
   for (const row of rows) {
-    const comments = database.prepare(commentSelectSql()).all(row.id);
+    const comments = database.prepare(commentSelectSql()).all(row.id)
+      .filter((comment) => !isCommentEarlierThanTicket(comment.timestamp, row.created));
     tickets.push(rowToTicket(row, comments));
   }
   return tickets;
@@ -198,7 +262,8 @@ export function getTicketById(id) {
   const database = getDb();
   const row = database.prepare('SELECT * FROM tickets WHERE id = ?').get(Number(id));
   if (!row) return null;
-  const comments = database.prepare(commentSelectSql()).all(row.id);
+  const comments = database.prepare(commentSelectSql()).all(row.id)
+    .filter((comment) => !isCommentEarlierThanTicket(comment.timestamp, row.created));
   const parentRow = row.parent_ticket_id
     ? database.prepare('SELECT id, title, status, assigned_agent FROM tickets WHERE id = ?').get(row.parent_ticket_id)
     : null;
@@ -216,6 +281,7 @@ export function createTicket(ticket) {
   const now = new Date().toISOString();
   const stmt = database.prepare(`
     INSERT INTO tickets (
+      id,
       title,
       description,
       status,
@@ -245,9 +311,11 @@ export function createTicket(ticket) {
       locked_by,
       locked_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  const info = stmt.run(
+  const id = allocateId(database, 'tickets', 'tickets');
+  stmt.run(
+    id,
     ticket.title ?? '',
     ticket.description ?? '',
     ticket.status ?? 'queued',
@@ -277,7 +345,6 @@ export function createTicket(ticket) {
     ticket.locked_by ?? null,
     ticket.locked_at ?? null
   );
-  const id = info.lastInsertRowid;
   const comments = ticket.comments || [];
   if (comments.length > 0) {
     const insertComment = database.prepare(
@@ -410,16 +477,24 @@ export function deleteTicket(id) {
   const database = getDb();
   const ticket = database.prepare('SELECT id FROM tickets WHERE id = ?').get(Number(id));
   if (!ticket) return false;
-  database.prepare('DELETE FROM tickets WHERE id = ?').run(Number(id));
+  const run = database.transaction((ticketId) => {
+    database.prepare('DELETE FROM ticket_comments WHERE ticket_id = ?').run(Number(ticketId));
+    database.prepare('DELETE FROM tickets WHERE id = ?').run(Number(ticketId));
+  });
+  run(id);
   return true;
 }
 
 export function deleteTickets(ids) {
   const database = getDb();
-  const placeholders = ids.map(() => '?').join(',');
-  const stmt = database.prepare(`DELETE FROM tickets WHERE id IN (${placeholders})`);
-  const info = stmt.run(...ids.map(Number));
-  return info.changes;
+  const normalizedIds = ids.map(Number);
+  const placeholders = normalizedIds.map(() => '?').join(',');
+  const run = database.transaction((ticketIds) => {
+    database.prepare(`DELETE FROM ticket_comments WHERE ticket_id IN (${placeholders})`).run(...ticketIds);
+    const info = database.prepare(`DELETE FROM tickets WHERE id IN (${placeholders})`).run(...ticketIds);
+    return info.changes;
+  });
+  return run(normalizedIds);
 }
 
 // 依赖关系管理

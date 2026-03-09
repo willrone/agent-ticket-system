@@ -2,6 +2,8 @@
  * Express 应用 - 导出 app 供测试使用，server.js 仅负责 listen
  */
 import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import * as store from './store.js';
 import { getBots } from './bots.js';
 import {
@@ -18,14 +20,31 @@ import { DEFAULT_TRIAGE_OWNER, TICKET_STATUSES, enrichTicketRouting } from './ti
 import { detectWorkflowMismatch } from './workflow-mismatch.js';
 import * as dispatch from './dispatch.js';
 import { TRANSITIONS, transition, getAvailableActions } from './state-machine.js';
+import { getNotificationSessionKey } from './agent-session-router.js';
 import { broadcastTicketStatusChanged, broadcastTicketComment } from './websocket.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
 const ALLOWED_TICKET_STATUSES = TICKET_STATUSES;
 const ALLOWED_REQUEST_TYPES = ['feature', 'bug', 'optimization', 'ops'];
-const OPEN_TICKET_STATUSES = new Set(['triage', 'queued', 'review', 'blocked', 'failed']);
+const ACTIVE_TICKET_STATUSES = new Set(['triage', 'queued', 'running', 'done', 'review', 'pending_decision', 'blocked']);
+const WAITING_REVIEW_STATUSES = new Set(['done', 'review']);
+const CLOSED_TICKET_STATUSES = new Set(['complete', 'failed']);
+const STATUS_DISTRIBUTION_META = {
+  triage: { name: '待分诊', color: '#8b5cf6' },
+  queued: { name: '待处理', color: '#3b82f6' },
+  running: { name: '进行中', color: '#f59e0b' },
+  done: { name: '待验收', color: '#22c55e' },
+  review: { name: '审核中', color: '#06b6d4' },
+  pending_decision: { name: '待决策', color: '#a855f7' },
+  blocked: { name: '阻塞', color: '#f97316' },
+  failed: { name: '失败', color: '#ef4444' },
+  complete: { name: '已关单', color: '#10b981' },
+};
 
 function parseCsvParam(value) {
   if (typeof value !== 'string') return [];
@@ -114,10 +133,12 @@ app.get('/api/bots', async (_req, res) => {
 // GET /api/metrics/dashboard
 function computeDashboardMetrics() {
   const tickets = store.getAllTickets().map((ticket) => enrichTicketRouting(ticket));
-  const open = tickets.filter((t) => OPEN_TICKET_STATUSES.has(t.status)).length;
+  const total = tickets.length;
+  const active = tickets.filter((t) => ACTIVE_TICKET_STATUSES.has(t.status)).length;
   const inProgress = tickets.filter((t) => t.status === 'running').length;
-  const resolved = tickets.filter((t) => t.status === 'done').length;
-  const stats = { total: tickets.length, open, inProgress, resolved };
+  const waitingReview = tickets.filter((t) => WAITING_REVIEW_STATUSES.has(t.status)).length;
+  const closed = tickets.filter((t) => CLOSED_TICKET_STATUSES.has(t.status)).length;
+  const stats = { total, active, inProgress, waitingReview, closed };
 
   const dayCounts = {};
   const now = new Date();
@@ -135,11 +156,20 @@ function computeDashboardMetrics() {
   }
   const weeklyTickets = Object.values(dayCounts).sort((a, b) => a.day.localeCompare(b.day));
 
-  const statusDistribution = [
-    { name: 'Open', value: open, color: '#ef4444' },
-    { name: 'In Progress', value: inProgress, color: '#f59e0b' },
-    { name: 'Resolved', value: resolved, color: '#22c55e' },
-  ].filter((x) => x.value > 0);
+  const countsByStatus = tickets.reduce((acc, ticket) => {
+    const key = ticket.status;
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  const statusDistribution = Object.entries(STATUS_DISTRIBUTION_META)
+    .map(([status, meta]) => ({
+      status,
+      name: meta.name,
+      value: countsByStatus[status] || 0,
+      color: meta.color,
+    }))
+    .filter((item) => item.value > 0);
 
   return { stats, weeklyTickets, statusDistribution };
 }
@@ -605,8 +635,8 @@ app.get('/api/dispatch/ready', (req, res) => {
   for (const ticket of allTickets) {
     const mismatch = detectWorkflowMismatch(ticket);
     if (mismatch) {
-      // workflow_mismatch 告警发给当前责任人，而不是老大
-      const agent = ticket.next_actor || mismatch.alert_target || '荣晖';
+      // workflow_mismatch 告警优先发给建议接手人（如 decision_owner / review_owner），其次回退当前责任人
+      const agent = mismatch.alert_target || ticket.next_actor || '荣晖';
       if (!agent) continue;
       candidates.push({ ticket, agent, kind: 'workflow_mismatch', mismatch });
     } else if (ticket.should_notify && ticket.next_actor && ticket.status !== 'pending_decision') {
@@ -753,12 +783,22 @@ app.get('/api/notifications/ready', (req, res) => {
       message = `📋 工单待验收\n\n#${ticket.id} ${ticket.title}\n结果：${ticket.result_summary || '待验收'}`;
     }
     
+    const target_session_key = getNotificationSessionKey({
+      status: ticket.status,
+      reviewOwner: ticket.review_owner,
+      ticketId: ticket.id,
+    });
+
     ready.push({
       event_id: eventId,
       type: eventType,
       ticket_id: ticket.id,
       title: ticket.title,
       status: ticket.status,
+      target_actor: eventType === 'done' || eventType === 'review'
+        ? (ticket.review_owner || ticket.triage_owner || null)
+        : (ticket.decision_owner || '荣晖'),
+      target_session_key,
       message,
     });
   }
@@ -959,9 +999,6 @@ app.post('/api/audits/:id/ack', (req, res) => {
   res.json({ success: true, audit_id: auditId });
 });
 
-export { app };
-export default app;
-
 // POST /api/tickets/:id/transition - 状态转换接口（强制）
 app.post('/api/tickets/:id/transition', (req, res) => {
   const id = req.params.id;
@@ -1045,4 +1082,15 @@ app.get('/api/tickets/:id/actions', (req, res) => {
     available_actions: actions
   });
 });
+
+// 静态文件服务 - 提供前端页面
+const distPath = path.join(__dirname, '..', 'dist');
+app.use(express.static(distPath));
+
+// SPA fallback - 所有未匹配的非 API 路由返回 index.html
+app.get(/^(?!\/api\/).*/, (_req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
+
+export default app;
 

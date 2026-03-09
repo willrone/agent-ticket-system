@@ -5,15 +5,17 @@ import * as dashboardApi from '../api/dashboard';
 
 const mockMetrics = {
   data: {
-    stats: { total: 3, open: 2, inProgress: 1, resolved: 0 },
+    stats: { total: 5, active: 3, inProgress: 1, waitingReview: 1, closed: 2 },
     weeklyTickets: [
       { day: '2026-03-03', tickets: 1 },
-      { day: '2026-03-04', tickets: 1 },
-      { day: '2026-03-05', tickets: 1 },
+      { day: '2026-03-04', tickets: 2 },
+      { day: '2026-03-05', tickets: 2 },
     ],
     statusDistribution: [
-      { name: 'Open', value: 2, color: '#ef4444' },
-      { name: 'In Progress', value: 1, color: '#f59e0b' },
+      { status: 'running', name: '进行中', value: 1, color: '#f59e0b' },
+      { status: 'done', name: '待验收', value: 1, color: '#22c55e' },
+      { status: 'complete', name: '已关单', value: 2, color: '#10b981' },
+      { status: 'queued', name: '待处理', value: 1, color: '#3b82f6' },
     ],
   },
 };
@@ -32,33 +34,49 @@ describe('Dashboard', () => {
     expect(screen.getByText(/Dashboard 加载中/)).toBeInTheDocument();
   });
 
-  it('renders dashboard with stats on success', async () => {
-    render(<Dashboard />);
+  it('renders dashboard with runtime-semantic stats on success', async () => {
+    const { container } = render(<Dashboard />);
     await waitFor(() => {
       expect(screen.getByText(/Dashboard/)).toBeInTheDocument();
     });
-    expect(screen.getByText('3')).toBeInTheDocument();
-    expect(screen.getByText('2')).toBeInTheDocument();
-    expect(screen.getByText('1')).toBeInTheDocument();
-    expect(screen.getByText('0')).toBeInTheDocument();
+    expect(screen.getByText('总工单')).toBeInTheDocument();
+    expect(screen.getByText('进行中')).toBeInTheDocument();
+    expect(screen.getByText('待验收 / 审核中')).toBeInTheDocument();
+    expect(screen.getByText('已结束')).toBeInTheDocument();
+
+    const statCards = Array.from(container.querySelectorAll('.stat-card')).map((card) => card.textContent || '');
+    expect(statCards).toEqual(expect.arrayContaining([
+      expect.stringContaining('总工单5'),
+      expect.stringContaining('进行中1'),
+      expect.stringContaining('待验收 / 审核中1'),
+      expect.stringContaining('已结束2'),
+    ]));
+
+    expect(screen.getByText('最近 7 天新增工单')).toBeInTheDocument();
+    expect(screen.getByText('真实状态分布')).toBeInTheDocument();
     expect(dashboardApi.fetchDashboardMetrics).toHaveBeenCalled();
   });
 
   it('shows error state and retry on fetch failure', async () => {
-    vi.mocked(dashboardApi.fetchDashboardMetrics).mockRejectedValue(new Error('Request failed with 404'));
+    vi.mocked(dashboardApi.fetchDashboardMetrics)
+      .mockRejectedValueOnce(new Error('Request failed with 404'))
+      .mockResolvedValueOnce(mockMetrics);
 
-    render(<Dashboard />);
+    const { container } = render(<Dashboard />);
 
     await waitFor(() => {
       expect(screen.getByText(/Dashboard 加载失败/)).toBeInTheDocument();
     });
     expect(screen.getByText(/Request failed with 404/)).toBeInTheDocument();
 
-    vi.mocked(dashboardApi.fetchDashboardMetrics).mockResolvedValue(mockMetrics);
     fireEvent.click(screen.getByRole('button', { name: /重试/ }));
 
     await waitFor(() => {
-      expect(screen.getByText('3')).toBeInTheDocument();
+      const statCards = Array.from(container.querySelectorAll('.stat-card')).map((card) => card.textContent || '');
+      expect(statCards).toEqual(expect.arrayContaining([
+        expect.stringContaining('总工单5'),
+        expect.stringContaining('已结束2'),
+      ]));
     });
   });
 });

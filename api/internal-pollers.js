@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { getDispatchSessionKeyForTicket, getAuditSessionKeyForTicket, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
+import { getDispatchSessionKeyForTicket, getAuditSessionKeyForTicket, getNotificationSessionKey, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
 
 const DEFAULT_API_BASE_URL = process.env.TICKET_API_BASE_URL || 'http://127.0.0.1:8788';
 const DEFAULT_DISPATCH_INTERVAL_MS = parsePositiveInt(process.env.TICKET_DISPATCH_POLL_INTERVAL_MS, 5 * 1000);
@@ -193,13 +193,18 @@ export function startInternalPollers(options = {}) {
       if (ready.length === 0) return;
 
       for (const item of ready) {
-        const { event_id, message } = item;
+        const { event_id, message, status, ticket_id, target_session_key, target_actor } = item;
         if (!event_id || !message) continue;
+        const sessionKey = target_session_key || getNotificationSessionKey({
+          status,
+          reviewOwner: target_actor,
+          ticketId: ticket_id,
+        });
         const idempotencyKey = makeIdempotencyKey(`notify-${event_id}`);
         try {
           await withTimeout(
             sendChatToSession({
-              sessionKey: NOTIFY_MAIN_SESSION,
+              sessionKey,
               message,
               idempotencyKey,
             }),
@@ -207,7 +212,7 @@ export function startInternalPollers(options = {}) {
             'notify chat.send',
           );
           await ackNotification(apiBaseUrl, event_id);
-          console.log(`[internal-poller:notify] delivered and acked event_id=${event_id} -> ${NOTIFY_MAIN_SESSION}`);
+          console.log(`[internal-poller:notify] delivered and acked event_id=${event_id} -> ${sessionKey}`);
         } catch (err) {
           console.error(`[internal-poller:notify] delivery failed for event_id=${event_id}, no ack:`, err?.message || err);
         }

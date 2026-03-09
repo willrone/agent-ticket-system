@@ -39,7 +39,7 @@ function loadJson() {
 function initSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS tickets (
-      id INTEGER PRIMARY KEY,
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
       description TEXT DEFAULT '',
       status TEXT NOT NULL DEFAULT 'queued',
@@ -121,7 +121,12 @@ function migrate() {
         t.error ?? null
       );
       deleteComments.run(t.id);
+      const createdAt = Date.parse(t.created ?? '');
       for (const c of t.comments || []) {
+        const commentAt = Date.parse(c.timestamp ?? '');
+        if (!Number.isNaN(createdAt) && !Number.isNaN(commentAt) && commentAt < createdAt) {
+          continue;
+        }
         insertComment.run(
           c.id,
           t.id,

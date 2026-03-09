@@ -11,6 +11,7 @@ export function parseJsonArray(value) {
 export function normalizeCommentShape(comment = {}) {
   return {
     id: comment.id ?? Date.now(),
+    ticket_id: comment.ticket_id ?? null,
     author: comment.author ?? 'Current User',
     timestamp: comment.timestamp ?? new Date().toISOString(),
     content: comment.content ?? '',

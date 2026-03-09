@@ -3,11 +3,11 @@
  * 平台直驱：agent -> sessionKey 路由
  */
 import { describe, it, expect } from 'vitest';
-import { getDispatchSessionKeyForTicket, getSessionKeyForAgent, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
+import { getDispatchSessionKeyForTicket, getNotificationSessionKey, getSessionKeyForAgent, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
 
 describe('agent-session-router (direct-drive)', () => {
-  it('NOTIFY_MAIN_SESSION 为 agent:main:main', () => {
-    expect(NOTIFY_MAIN_SESSION).toBe('agent:main:main');
+  it('NOTIFY_MAIN_SESSION 为老大主会话直连 session', () => {
+    expect(NOTIFY_MAIN_SESSION).toBe('agent:main:telegram:direct:8290057699');
   });
 
   it('已知 agent 映射到正确主会话', () => {
@@ -44,5 +44,22 @@ describe('agent-session-router (direct-drive)', () => {
     expect(getSessionKeyForAgent('')).toBe('agent:main:main');
     expect(getSessionKeyForAgent(null)).toBe('agent:main:main');
     expect(getSessionKeyForAgent(undefined)).toBe('agent:main:main');
+  });
+
+
+  it('done/review 通知路由到 reviewer 的 ticket session', () => {
+    expect(getNotificationSessionKey({ status: 'done', reviewOwner: 'leoss', ticketId: 31 }))
+      .toBe('agent:main:ticket:31');
+    expect(getNotificationSessionKey({ status: 'review', reviewOwner: 'beavy', ticketId: 26 }))
+      .toBe('agent:beavy:ticket:26');
+  });
+
+  it('pending_decision/complete/failed 通知继续路由到主会话', () => {
+    expect(getNotificationSessionKey({ status: 'pending_decision', reviewOwner: 'leoss', ticketId: 31 }))
+      .toBe(NOTIFY_MAIN_SESSION);
+    expect(getNotificationSessionKey({ status: 'complete', reviewOwner: 'beavy', ticketId: 26 }))
+      .toBe(NOTIFY_MAIN_SESSION);
+    expect(getNotificationSessionKey({ status: 'failed', reviewOwner: 'beavy', ticketId: 26 }))
+      .toBe(NOTIFY_MAIN_SESSION);
   });
 });

@@ -2,7 +2,7 @@
  * Agent -> OpenClaw sessionKey 路由
  * 平台直驱：
  * - dispatch: 每张工单进入独立 ticket session，避免堆爆 agent 主会话
- * - notify: 固定发往 agent:main:main
+ * - notify: done/review 发 reviewer ticket session；pending_decision/complete/failed 发主会话
  */
 
 const AGENT_SESSION_BASES = {
@@ -46,6 +46,20 @@ export function getDispatchSessionKeyForTicket(agent, ticketId) {
     return `${base}:main`;
   }
   return `${base}:ticket:${normalizedTicketId}`;
+}
+
+
+/**
+ * 通知 sessionKey 路由：
+ * - done/review：发给 review_owner 对应的独立 ticket session
+ * - pending_decision/complete/failed：发给主会话（老大）
+ */
+export function getNotificationSessionKey({ status, reviewOwner, ticketId }) {
+  const normalizedStatus = String(status ?? '').trim().toLowerCase();
+  if (normalizedStatus === 'done' || normalizedStatus === 'review') {
+    return getDispatchSessionKeyForTicket(reviewOwner, ticketId);
+  }
+  return NOTIFY_MAIN_SESSION;
 }
 
 /** Sheeply 审计会话：agent:auditor:audit:<ticket_id> */

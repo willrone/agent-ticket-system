@@ -54,7 +54,8 @@ npm run build     # 前端构建
    - 派单文案会显式要求执行会话在推进状态前先把关键进展写入自身工作区记忆，避免主会话不知道发生了什么
 2. **notify poller**（默认 2 分钟）
    - 检测 `/api/notifications/ready`
-   - 直发 **agent:main:main**（老大/主会话）；仅 delivery 成功后才 ack 对应 notification 事件
+   - 按通知类型分流：`done/review -> review_owner` 对应 ticket session，`pending_decision/complete/failed -> agent:main:main`（老大/主会话）
+   - 仅 delivery 成功后才 ack 对应 notification 事件
 
 > **Sheeply（agent:auditor:main）** 仅保留工单审计等角色，**不再参与 dispatch/notify 执行链路**。业务判断仍由 `/api/dispatch/ready` 与 `/api/notifications/ready` 的 API 决定；平台只负责按 ready 结果直驱投递与严格 ack。
 >

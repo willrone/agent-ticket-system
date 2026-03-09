@@ -253,15 +253,22 @@ http://127.0.0.1:8788/api
 {
   "ready": [
     {
-      "event_id": "evt_456",
+      "event_id": 456,
+      "type": "done",
       "ticket_id": 22,
-      "status": "complete",
-      "result_summary": "已完成",
-      "created_at": "2026-03-08T16:00:00Z"
+      "title": "修复待验收通知路由",
+      "status": "done",
+      "target_actor": "leoss",
+      "target_session_key": "agent:main:ticket:22",
+      "message": "📋 工单待验收\n\n#22 修复待验收通知路由\n结果：已完成"
     }
   ]
 }
 ```
+
+**路由规则**：
+- `done / review`：`target_session_key` 指向 `review_owner` 的 ticket session
+- `pending_decision / complete / failed`：`target_session_key` 指向老大主会话
 
 ### POST /notifications/ack
 

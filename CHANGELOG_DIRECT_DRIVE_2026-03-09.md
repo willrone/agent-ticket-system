@@ -29,7 +29,9 @@
 - 未知 agent / 人名类目标（如 `荣晖`）回退到 `agent:main:main`
 
 ### 2. 平台直驱 notify
-- `notify poller` 直接把 `notifications/ready` 投递到 `agent:main:main`
+- `notify poller` 按状态分流 `notifications/ready`：
+  - `done/review` -> `review_owner` 对应 ticket session
+  - `pending_decision/complete/failed` -> `agent:main:main`
 - 不再通过 Sheeply 中转
 
 ### 3. ack 规则收紧

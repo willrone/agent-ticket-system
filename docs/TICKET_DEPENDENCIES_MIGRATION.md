@@ -87,7 +87,7 @@ VALUES
 ```sql
 INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id, dependency_type)
 VALUES 
-  (102, 101,  -- #102 依赖 #101
+  (102, 101, 'blocks'),  -- #102 依赖 #101
   (103, 102, 'blocks');  -- #103 依赖 #102
 ```
 
@@ -211,4 +211,5 @@ A: 当前系统不会自动检测循环依赖，需要人工避免。建议在�
 - 依赖管理函数: `api/store-sqlite.js` (addDependency, removeDependency, etc.)
 - dispatch 门禁: `api/app.js` (GET /api/dispatch/ready)
 - 前端 API: `src/api/tickets.js` (fetchTicketDependencies, addTicketDependency, removeTicketDependency)
-- 前端展示: `src/pages/TicketDetail.jsx` (待实现)
+- 前端详情页展示: `src/pages/TicketDetail.jsx` (依赖关系展示和编辑)
+- 前端列表页展示: `src/pages/Tickets.jsx` (TicketDependencies 组件)

@@ -70,7 +70,7 @@ describe('store-sqlite', () => {
     const withComment = store.addComment(1, {
       author: 'user',
       content: 'Hello',
-      timestamp: '2026-01-01 12:00',
+      timestamp: '2099-01-01T12:00:00.000Z',
     });
     expect(withComment.comments).toHaveLength(1);
     expect(withComment.comments[0].author).toBe('user');
@@ -209,5 +209,45 @@ describe('store-sqlite', () => {
         expect.objectContaining({ id: child.id, title: 'Child', assigned_agent: 'beavy' }),
       ])
     );
+  });
+
+  it('删除工单后新建不会复用旧 ticket id', () => {
+    const first = store.createTicket({ title: 'First', description: 'A' });
+    const second = store.createTicket({ title: 'Second', description: 'B' });
+
+    expect(first.id).toBe(1);
+    expect(second.id).toBe(2);
+
+    expect(store.deleteTicket(second.id)).toBe(true);
+
+    const third = store.createTicket({ title: 'Third', description: 'C' });
+    expect(third.id).toBe(3);
+  });
+
+  it('读取工单时会过滤早于工单创建时间的脏评论', () => {
+    const created = store.createTicket({
+      title: 'Ticket with stale comments',
+      description: 'D',
+      created: '2026-03-09T07:22:22.491Z',
+      comments: [
+        {
+          id: 1001,
+          author: 'legacy',
+          timestamp: '2026-03-07T08:29:09.572Z',
+          content: 'old leaked comment',
+        },
+        {
+          id: 1002,
+          author: 'beavy',
+          timestamp: '2026-03-09T07:22:43.645Z',
+          content: 'valid comment',
+        },
+      ],
+    });
+
+    const detail = store.getTicketById(created.id);
+    expect(detail.comments).toHaveLength(1);
+    expect(detail.comments[0].content).toBe('valid comment');
+    expect(detail.comments[0].ticket_id).toBe(created.id);
   });
 });
