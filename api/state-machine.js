@@ -1,169 +1,257 @@
 /**
  * State Machine - 工单状态转换引擎
- * 
+ *
  * 核心职责：
  * 1. 定义合法的状态转换规则
- * 2. 自动路由 next_actor
+ * 2. 自动路由 current_actor / next_actor
  * 3. 执行副作用（锁定、解锁、清空通知）
  * 4. 拒绝非法转换
  */
 
 import * as store from './store.js';
 import * as dispatch from './dispatch.js';
+import {
+  DEFAULT_DECISION_OWNER,
+  WORKFLOW_TRANSITION_META,
+  listAvailableActionsForStatus,
+  resolveResumeStatus,
+  enrichTicketWorkflow,
+  resolveRoleActor,
+} from '../workflow-schema.js';
+import {
+  executionModeRequiresWorker,
+  getExecutionWorkerEvidence,
+  getExecutionModeMeta,
+} from '../execution-policy.js';
 
-/**
- * 状态转换定义
- * 
- * 每个 action 定义：
- * - from: 允许的起始状态列表
- * - to: 目标状态
- * - required_fields: 必填字段
- * - side_effects: 副作用函数（自动路由、锁定等）
- */
-export const TRANSITIONS = {
-  // 开工：queued → running
-  start_work: {
-    from: ['queued'],
-    to: 'running',
-    required_fields: ['actor'],
-    side_effects: (ticket, context) => {
+export const TRANSITIONS = Object.fromEntries(
+  Object.entries(WORKFLOW_TRANSITION_META).map(([action, meta]) => [
+    action,
+    {
+      from: meta.from,
+      to: meta.to,
+      required_fields: meta.required_fields,
+      label: meta.label,
+      role_key: meta.role_key,
+    },
+  ])
+);
+
+const RUNNING_ENTRY_ACTIONS = new Set(['start_work', 'resume']);
+
+function buildRunningConflictResult(ticket, context = {}, action) {
+  const actor = String(context.actor || '').trim();
+  const assignedAgent = String(ticket.assigned_agent || '').trim();
+  if (!actor || !assignedAgent || actor !== assignedAgent) return null;
+
+  const conflict = store.findRunningTicketConflict({
+    assignedAgent,
+    excludeTicketId: ticket.id,
+  });
+  if (!conflict) return null;
+
+  return {
+    success: false,
+    statusCode: 409,
+    error: 'RUNNING_TICKET_CONFLICT',
+    message: `agent ${assignedAgent} 已有进行中的工单 #${conflict.id}，当前工单不能再进入 running`,
+    actor: assignedAgent,
+    attempted_action: action,
+    current_status: ticket.status,
+    recommended_action: action === 'resume' ? '请先 pause/block/done/failed 已占用工单，或保持当前工单为 paused' : '请先完成/挂起/阻塞当前 running 工单，或稍后再 start_work',
+    conflict_ticket: conflict,
+  };
+}
+
+function buildWorkerRequiredRunningGuardResult(ticket, action) {
+  if (!executionModeRequiresWorker(ticket.execution_mode)) return null;
+
+  const evidence = getExecutionWorkerEvidence(ticket);
+  if (evidence.has_worker_evidence) return null;
+
+  const modeMeta = getExecutionModeMeta(ticket.execution_mode) || {};
+  return {
+    success: false,
+    statusCode: 409,
+    error: 'EXECUTION_WORKER_REQUIRED',
+    message: `execution_mode=${ticket.execution_mode} 的工单进入 running 前必须先派生并登记 worker`,
+    attempted_action: action,
+    current_status: ticket.status,
+    execution_mode: ticket.execution_mode || null,
+    expected_worker_type: modeMeta.worker_type || null,
+    requires_worker: true,
+    worker_evidence: evidence,
+  };
+}
+
+function buildDynamicTransitionTarget(action, ticket, context) {
+  switch (action) {
+    case 'formal_reassign':
+    case 'handoff':
+      return 'queued';
+    default:
+      return action === 'resume' ? resolveResumeStatus(ticket) : TRANSITIONS[action]?.to;
+  }
+}
+
+function buildTransitionSideEffects(action, ticket, context) {
+  switch (action) {
+    case 'queue':
+      return {
+        next_actor_override: null,
+        locked_by: null,
+        locked_at: null,
+      };
+
+    case 'start_work':
       return {
         locked_by: context.actor,
         locked_at: new Date().toISOString(),
-        next_actor: context.actor,
+        next_actor_override: null,
       };
-    },
-  },
 
-  // 提交 review：running → done
-  submit_for_review: {
-    from: ['running'],
-    to: 'done',
-    required_fields: ['actor', 'result_summary'],
-    side_effects: (ticket, context) => {
-      const reviewer = ticket.review_owner || ticket.triage_owner;
+    case 'reset_to_queued':
+      return {
+        next_actor_override: null,
+        locked_by: null,
+        locked_at: null,
+        paused_from_status: null,
+        paused_by: null,
+        paused_at: null,
+        pause_reason: null,
+      };
+
+    case 'submit_for_review':
       return {
         result_summary: context.result_summary,
-        next_actor: reviewer,
+        next_actor_override: null,
         locked_by: null,
         locked_at: null,
       };
-    },
-  },
 
-  // 请求决策：running/review → pending_decision
-  request_decision: {
-    from: ['running', 'review'],
-    to: 'pending_decision',
-    required_fields: ['actor', 'decision_summary'],
-    side_effects: (ticket, context) => {
+    case 'start_review':
+      return {
+        next_actor_override: null,
+        locked_by: null,
+        locked_at: null,
+      };
+
+    case 'request_decision':
       return {
         decision_summary: context.decision_summary,
         decision_context: context.decision_context || null,
-        next_actor: ticket.decision_owner || '荣晖',
+        next_actor_override: null,
         locked_by: null,
         locked_at: null,
       };
-    },
-  },
 
-  // Review 通过：done/review → complete
-  approve: {
-    from: ['done', 'review'],
-    to: 'complete',
-    required_fields: ['actor'],
-    side_effects: (ticket, context) => {
+    case 'pause':
       return {
-        next_actor: null,
+        pause_reason: context.pause_reason,
+        paused_from_status: ticket.status,
+        paused_by: context.actor,
+        paused_at: new Date().toISOString(),
+        next_actor_override: null,
         locked_by: null,
         locked_at: null,
       };
-    },
-  },
 
-  // Review 不通过：done/review → queued
-  reject: {
-    from: ['done', 'review'],
-    to: 'queued',
-    required_fields: ['actor', 'reject_reason'],
-    side_effects: (ticket, context) => {
+    case 'resume': {
+      const resumeStatus = resolveResumeStatus(ticket);
+      const updates = {
+        status: resumeStatus,
+        next_actor_override: null,
+        locked_by: null,
+        locked_at: null,
+        paused_from_status: null,
+        paused_by: null,
+        paused_at: null,
+        pause_reason: null,
+      };
+
+      if (resumeStatus === 'running') {
+        updates.locked_by = ticket.assigned_agent || context.actor;
+        updates.locked_at = new Date().toISOString();
+      }
+
+      return updates;
+    }
+
+    case 'formal_reassign':
       return {
-        next_actor: ticket.assigned_agent,
-        result_summary: null, // 清空旧结果
+        assigned_agent: context.target_agent,
+        next_actor_override: null,
         locked_by: null,
         locked_at: null,
+        paused_from_status: null,
+        paused_by: null,
+        paused_at: null,
+        pause_reason: null,
       };
-    },
-  },
 
-  // 标记阻塞：running → blocked
-  block: {
-    from: ['running'],
-    to: 'blocked',
-    required_fields: ['actor', 'blocker_summary'],
-    side_effects: (ticket, context) => {
+    case 'handoff':
       return {
-        next_actor: ticket.triage_owner,
+        assigned_agent: context.target_agent,
+        next_actor_override: null,
         locked_by: null,
         locked_at: null,
+        paused_from_status: null,
+        paused_by: null,
+        paused_at: null,
+        pause_reason: null,
       };
-    },
-  },
 
-  // 解除阻塞：blocked → queued
-  unblock: {
-    from: ['blocked'],
-    to: 'queued',
-    required_fields: ['actor'],
-    side_effects: (ticket, context) => {
+    case 'approve':
       return {
-        next_actor: ticket.assigned_agent,
+        next_actor_override: null,
         locked_by: null,
         locked_at: null,
       };
-    },
-  },
 
-  // 标记失败：running → failed
-  fail: {
-    from: ['running'],
-    to: 'failed',
-    required_fields: ['actor', 'error'],
-    side_effects: (ticket, context) => {
+    case 'reject':
+      return {
+        next_actor_override: null,
+        result_summary: null,
+        locked_by: null,
+        locked_at: null,
+      };
+
+    case 'block':
+      return {
+        next_actor_override: null,
+        locked_by: null,
+        locked_at: null,
+      };
+
+    case 'unblock':
+      return {
+        next_actor_override: null,
+        locked_by: null,
+        locked_at: null,
+      };
+
+    case 'fail':
       return {
         error: context.error,
-        next_actor: ticket.triage_owner,
+        next_actor_override: null,
         locked_by: null,
         locked_at: null,
       };
-    },
-  },
 
-  // 从决策恢复：pending_decision → queued/running
-  resume_from_decision: {
-    from: ['pending_decision'],
-    to: 'queued', // 或 'running'，由调用方指定
-    required_fields: ['actor'],
-    side_effects: (ticket, context) => {
+    case 'resume_from_decision':
       return {
-        next_actor: ticket.assigned_agent,
         decision_summary: null,
         decision_context: null,
+        next_actor_override: null,
         locked_by: null,
         locked_at: null,
       };
-    },
-  },
-};
 
-/**
- * 执行状态转换
- * 
- * @param {number} ticketId - 工单 ID
- * @param {string} action - 转换动作（如 'start_work'）
- * @param {object} context - 上下文（actor, result_summary 等）
- * @returns {object} { success, ticket?, error? }
- */
+    default:
+      return {};
+  }
+}
+
 export function transition(ticketId, action, context = {}) {
   const ticket = store.getTicketById(ticketId);
   if (!ticket) {
@@ -179,7 +267,6 @@ export function transition(ticketId, action, context = {}) {
     };
   }
 
-  // 检查当前状态是否允许此转换
   if (!transitionDef.from.includes(ticket.status)) {
     return {
       success: false,
@@ -189,7 +276,6 @@ export function transition(ticketId, action, context = {}) {
     };
   }
 
-  // 检查必填字段
   for (const field of transitionDef.required_fields) {
     if (!context[field]) {
       return {
@@ -200,8 +286,24 @@ export function transition(ticketId, action, context = {}) {
     }
   }
 
-  // 检查工单锁定
-  if (ticket.locked_by && ticket.locked_by !== context.actor) {
+  if (action === 'reset_to_queued') {
+    const expectedActor = resolveRoleActor(ticket, transitionDef.role_key);
+    if (expectedActor && context.actor !== expectedActor) {
+      return {
+        success: false,
+        statusCode: 403,
+        error: 'ACTION_FORBIDDEN',
+        message: `${action} 仅允许 ${expectedActor} 执行`,
+        action,
+        actor: context.actor,
+        expected_actor: expectedActor,
+        role_key: transitionDef.role_key,
+        current_status: ticket.status,
+      };
+    }
+  }
+
+  if (action !== 'reset_to_queued' && ticket.locked_by && ticket.locked_by !== context.actor) {
     return {
       success: false,
       error: `Ticket locked by ${ticket.locked_by}`,
@@ -210,44 +312,51 @@ export function transition(ticketId, action, context = {}) {
     };
   }
 
-  // 执行状态转换
+  if (RUNNING_ENTRY_ACTIONS.has(action)) {
+    const workerRequired = buildWorkerRequiredRunningGuardResult(ticket, action);
+    if (workerRequired) {
+      return workerRequired;
+    }
+
+    const runningConflict = buildRunningConflictResult(ticket, context, action);
+    if (runningConflict) {
+      return runningConflict;
+    }
+  }
+
+  const nextStatus = buildDynamicTransitionTarget(action, ticket, context);
   const updates = {
-    status: transitionDef.to,
+    status: nextStatus,
     last_update: new Date().toISOString(),
   };
 
-  // 执行副作用
-  const sideEffects = transitionDef.side_effects(ticket, context);
-  Object.assign(updates, sideEffects);
+  Object.assign(updates, buildTransitionSideEffects(action, ticket, context));
 
-  // 写入数据库
-  store.updateTicket(ticketId, updates);
-
-  // 清空该工单的旧事件（状态变了，旧事件作废）
-  dispatch.clearNotificationEvents(ticketId);
-  dispatch.clearDispatchEvents(ticketId);
-
-  // 如果有新的 next_actor，创建 dispatch event
-  // 例外：pending_decision 只走通知链路，不进入 dispatch ready
-  if (updates.next_actor && updates.status !== 'pending_decision') {
-    dispatch.recordDispatchEvent(ticketId, updates.next_actor, updates.status);
+  if (nextStatus === 'pending_decision' && !ticket.decision_owner) {
+    updates.decision_owner = DEFAULT_DECISION_OWNER;
   }
 
-  const updatedTicket = store.getTicketById(ticketId);
+  store.updateTicket(ticketId, updates);
+
+  if (action === 'submit_for_review' && nextStatus === 'done') {
+    store.terminateActiveExecutionWorkersForTicket(ticketId);
+  }
+
+  dispatch.clearNotificationEvents(ticketId);
+  dispatch.clearDispatchEvents(ticketId);
+  dispatch.clearAuditEvents(ticketId);
+
+  const updatedTicket = enrichTicketWorkflow(store.getTicketById(ticketId));
+  const shouldDispatch = updatedTicket.workflow_notify_policy?.dispatch_ready && updatedTicket.current_actor;
+  if (shouldDispatch) {
+    dispatch.recordDispatchEvent(ticketId, updatedTicket.current_actor, updatedTicket.status);
+  }
+
   return { success: true, ticket: updatedTicket };
 }
 
-/**
- * 获取工单当前可执行的 actions
- * 
- * @param {number} ticketId - 工单 ID
- * @returns {string[]} 可执行的 action 列表
- */
 export function getAvailableActions(ticketId) {
   const ticket = store.getTicketById(ticketId);
   if (!ticket) return [];
-
-  return Object.entries(TRANSITIONS)
-    .filter(([action, def]) => def.from.includes(ticket.status))
-    .map(([action]) => action);
+  return listAvailableActionsForStatus(ticket.status);
 }

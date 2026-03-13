@@ -3413,6 +3413,86 @@ describe('agent-facing task API MVP', () => {
     expect(beavyResultComments).toHaveLength(1);
   });
 
+  it('submit_for_review 后 active execution workers 收为 terminal，reviewer 恢复出现在 dispatch/ready', async () => {
+    const { ticket, ready } = await createReadyAssignment({
+      execution_mode: 'subagent',
+      max_active_workers: 1,
+      review_owner: 'leoss',
+      title: 'Submit then reviewer dispatch',
+    });
+    await request(app)
+      .post(`/api/tickets/${ticket.id}/workers`)
+      .send({
+        worker_key: 'w1',
+        worker_type: 'subagent',
+        status: 'running',
+        session_key: 'sk',
+        run_id: 'r1',
+      })
+      .expect(201);
+    await request(app)
+      .post(`/api/tickets/${ticket.id}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+    const detailBefore = await request(app).get(`/api/tickets/${ticket.id}`).expect(200);
+    expect(detailBefore.body.worker_stats.active_workers).toBe(1);
+    expect(detailBefore.body.execution_guard?.suppress_dispatch).toBe(true);
+
+    await request(app)
+      .post(`/api/tickets/${ticket.id}/transition`)
+      .send({ action: 'submit_for_review', actor: 'beavy', result_summary: 'ready for review' })
+      .expect(200);
+
+    const detailAfter = await request(app).get(`/api/tickets/${ticket.id}`).expect(200);
+    expect(detailAfter.body.status).toBe('done');
+    expect(detailAfter.body.worker_stats.active_workers).toBe(0);
+    expect(detailAfter.body.execution_guard?.suppress_dispatch).toBe(false);
+    expect(detailAfter.body.current_workers).toHaveLength(0);
+
+    const dispatchRes = await request(app).get('/api/dispatch/ready').expect(200);
+    const reviewerItem = dispatchRes.body.ready.find((item) => item.ticket_id === ticket.id && item.agent === 'leoss');
+    expect(reviewerItem).toBeDefined();
+    expect(reviewerItem.status).toBe('done');
+  });
+
+  it('stale starting worker 不压制 done 工单的 dispatch', async () => {
+    const created = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Done with stale starting',
+        assigned_agent: 'beavy',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        execution_mode: 'subagent',
+        max_active_workers: 1,
+      })
+      .expect(201);
+    await request(app)
+      .post(`/api/tickets/${created.body.id}/workers`)
+      .send({
+        worker_key: 'stale',
+        worker_type: 'subagent',
+        status: 'starting',
+      })
+      .expect(201);
+    await request(app)
+      .post(`/api/tickets/${created.body.id}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${created.body.id}/transition`)
+      .send({ action: 'submit_for_review', actor: 'beavy', result_summary: 'done' })
+      .expect(200);
+    const detail = await request(app).get(`/api/tickets/${created.body.id}`).expect(200);
+    expect(detail.body.status).toBe('done');
+    expect(detail.body.worker_stats.active_workers).toBe(0);
+    expect(detail.body.execution_guard?.suppress_dispatch).toBe(false);
+    const dispatchRes = await request(app).get('/api/dispatch/ready').expect(200);
+    const item = dispatchRes.body.ready.find((r) => r.ticket_id === created.body.id);
+    expect(item).toBeDefined();
+    expect(item.agent).toBe('leoss');
+  });
+
   it('decision_request report 由平台解释为 pending_decision', async () => {
     const { ticket, ready } = await createReadyAssignment();
     const token = ready.assignment.assignment_token;

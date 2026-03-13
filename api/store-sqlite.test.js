@@ -190,6 +190,27 @@ describe('store-sqlite', () => {
     expect(cols).toContain('next_actor');
   });
 
+
+  it('持久化 paused 相关字段', () => {
+    const created = store.createTicket({
+      title: 'Paused ticket',
+      description: 'D',
+      status: 'paused',
+      assigned_agent: 'beavy',
+      paused_from_status: 'running',
+      paused_by: 'beavy',
+      paused_at: '2026-03-10T00:00:00.000Z',
+      pause_reason: '等待窗口期后继续',
+    });
+
+    const detail = store.getTicketById(created.id);
+    expect(detail.status).toBe('paused');
+    expect(detail.paused_from_status).toBe('running');
+    expect(detail.paused_by).toBe('beavy');
+    expect(detail.paused_at).toBe('2026-03-10T00:00:00.000Z');
+    expect(detail.pause_reason).toBe('等待窗口期后继续');
+  });
+
   it('支持基础父子工单关系读取', () => {
     const parent = store.createTicket({ title: 'Parent', description: 'root' });
     const child = store.createTicket({
@@ -209,6 +230,33 @@ describe('store-sqlite', () => {
         expect.objectContaining({ id: child.id, title: 'Child', assigned_agent: 'beavy' }),
       ])
     );
+  });
+
+  it('支持补充 smoke/validation/review sample 关系建模与聚合读取', () => {
+    const primary = store.createTicket({ title: 'Primary', description: 'main ticket', status: 'complete' });
+    const smoke = store.createTicket({ title: 'Smoke', description: 'smoke evidence', status: 'complete' });
+    const validation = store.createTicket({ title: 'Validation', description: 'validation evidence', status: 'done' });
+
+    expect(store.addTicketRelation(smoke.id, primary.id, 'smoke_of')).toBe(true);
+    expect(store.addTicketRelation(validation.id, primary.id, 'validation_of')).toBe(true);
+
+    const primaryDetail = store.getTicketById(primary.id);
+    const smokeDetail = store.getTicketById(smoke.id);
+
+    expect(primaryDetail.supplemental_tickets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relation_type: 'smoke_of', ticket: expect.objectContaining({ id: smoke.id }) }),
+      expect.objectContaining({ relation_type: 'validation_of', ticket: expect.objectContaining({ id: validation.id }) }),
+    ]));
+    expect(primaryDetail.supplemental_summary).toEqual(expect.objectContaining({
+      total: 2,
+      complete: 1,
+      pending_review: 1,
+      open: 1,
+    }));
+    expect(smokeDetail.supplemental_for_ticket).toEqual(expect.objectContaining({
+      relation_type: 'smoke_of',
+      ticket: expect.objectContaining({ id: primary.id, status: 'complete' }),
+    }));
   });
 
   it('删除工单后新建不会复用旧 ticket id', () => {
@@ -249,5 +297,152 @@ describe('store-sqlite', () => {
     expect(detail.comments).toHaveLength(1);
     expect(detail.comments[0].content).toBe('valid comment');
     expect(detail.comments[0].ticket_id).toBe(created.id);
+  });
+
+  it('长代码类工单默认推断为 subagent execution_mode', () => {
+    const created = store.createTicket({
+      title: '实现工单执行平台化',
+      description: '需要做后端 API 和前端联调',
+      implementation_scope: '前后端代码开发与测试回归',
+      assigned_agent: 'beavy',
+    });
+
+    expect(created.execution_mode).toBe('subagent');
+    expect(created.execution_mode_source).toBe('policy');
+    expect(created.execution_rule_key).toBe('coding_or_browser_long_task');
+    expect(created.max_active_workers).toBe(1);
+  });
+
+  it('direct 模式不允许登记 worker，subagent 模式受 max_active_workers 限制', () => {
+    const directTicket = store.createTicket({
+      title: '直接处理的小修复',
+      description: '只改一个文案',
+      assigned_agent: 'beavy',
+      execution_mode: 'direct',
+    });
+
+    expect(() => store.registerExecutionWorker(directTicket.id, {
+      worker_key: 'direct-1',
+      worker_type: 'subagent',
+      status: 'starting',
+    })).toThrow(/不允许登记 worker/);
+
+    const delegatedTicket = store.createTicket({
+      title: '重构执行治理',
+      description: '需要代码开发',
+      implementation_scope: '后端代码开发',
+      execution_mode: 'subagent',
+      max_active_workers: 1,
+      assigned_agent: 'beavy',
+    });
+
+    const firstWorker = store.registerExecutionWorker(delegatedTicket.id, {
+      worker_key: 'sub-1',
+      worker_type: 'subagent',
+      status: 'starting',
+      session_key: 'agent:beavy:ticket:47',
+    });
+    expect(firstWorker.worker_key).toBe('sub-1');
+
+    expect(() => store.registerExecutionWorker(delegatedTicket.id, {
+      worker_key: 'sub-2',
+      worker_type: 'subagent',
+      status: 'running',
+    })).toThrow(/活跃 worker 已达到上限 1/);
+
+    const updatedWorker = store.updateExecutionWorker(delegatedTicket.id, 'sub-1', {
+      status: 'succeeded',
+      finished_at: '2026-03-10T01:00:00.000Z',
+    });
+    expect(updatedWorker.status).toBe('succeeded');
+
+    const detail = store.getTicketById(delegatedTicket.id);
+    expect(detail.worker_stats.active_workers).toBe(0);
+    expect(detail.execution_workers).toHaveLength(1);
+  });
+
+  it('terminateActiveExecutionWorkersForTicket 将 starting/running 收为 succeeded，active_workers 归零', () => {
+    const t = store.createTicket({
+      title: 'Terminate workers',
+      execution_mode: 'subagent',
+      max_active_workers: 1,
+      assigned_agent: 'beavy',
+    });
+    store.registerExecutionWorker(t.id, {
+      worker_key: 'w1',
+      worker_type: 'subagent',
+      status: 'running',
+      session_key: 'sk',
+      run_id: 'rid',
+    });
+    let detail = store.getTicketById(t.id);
+    expect(detail.worker_stats.active_workers).toBe(1);
+    const changed = store.terminateActiveExecutionWorkersForTicket(t.id);
+    expect(changed).toBe(1);
+    detail = store.getTicketById(t.id);
+    expect(detail.worker_stats.active_workers).toBe(0);
+    expect(detail.current_workers).toHaveLength(0);
+    const w = store.getExecutionWorker(t.id, 'w1');
+    expect(w.status).toBe('succeeded');
+    expect(w.finished_at).toBeDefined();
+  });
+
+  it('stale starting worker（无 session_key/run_id 或 无新鲜 heartbeat）不计入 active，不压制 dispatch', () => {
+    const t = store.createTicket({
+      title: 'Stale starting',
+      execution_mode: 'subagent',
+      max_active_workers: 1,
+      assigned_agent: 'beavy',
+    });
+    store.registerExecutionWorker(t.id, {
+      worker_key: 'stale-1',
+      worker_type: 'subagent',
+      status: 'starting',
+      started_at: new Date().toISOString(),
+      last_heartbeat_at: null,
+    });
+    let detail = store.getTicketById(t.id);
+    expect(detail.worker_stats.total_workers).toBe(1);
+    expect(detail.worker_stats.active_workers).toBe(0);
+    expect(detail.current_workers).toHaveLength(0);
+    store.registerExecutionWorker(t.id, {
+      worker_key: 'real-1',
+      worker_type: 'subagent',
+      status: 'running',
+      session_key: 'sk',
+      run_id: 'r1',
+    });
+    detail = store.getTicketById(t.id);
+    expect(detail.worker_stats.active_workers).toBe(1);
+    expect(detail.current_workers.map((w) => w.worker_key)).toEqual(['real-1']);
+  });
+
+  it('queued/running gate 仍按有效 active 计数，stale starting 不占位', () => {
+    const t = store.createTicket({
+      title: 'Gate',
+      execution_mode: 'subagent',
+      max_active_workers: 1,
+      assigned_agent: 'beavy',
+    });
+    store.registerExecutionWorker(t.id, {
+      worker_key: 'stale',
+      worker_type: 'subagent',
+      status: 'starting',
+    });
+    expect(store.getTicketById(t.id).worker_stats.active_workers).toBe(0);
+    store.registerExecutionWorker(t.id, {
+      worker_key: 'runner',
+      worker_type: 'subagent',
+      status: 'running',
+      session_key: 's',
+      run_id: 'r',
+    });
+    expect(() =>
+      store.registerExecutionWorker(t.id, {
+        worker_key: 'second',
+        worker_type: 'subagent',
+        status: 'running',
+      })
+    ).toThrow(/活跃 worker 已达到上限/);
   });
 });
