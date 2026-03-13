@@ -3109,6 +3109,56 @@ describe('agent-facing task API MVP', () => {
     expect(ticketAfter.body.status).toBe('queued');
   });
 
+  it('review 阶段收到 accepted receipt 只确认 reviewer 已接单，不再推进新状态', async () => {
+    const { ticket, ready } = await createReadyAssignment({
+      status: 'review',
+      assigned_agent: 'beavy',
+      review_owner: 'leoss',
+      title: 'Review stage receipt accepted stays review',
+    });
+    const token = ready.assignment.assignment_token;
+
+    expect(ready.agent).toBe('leoss');
+
+    await request(app)
+      .post(`/api/dispatch/${ready.dispatch_id}/ack`)
+      .expect(200);
+
+    const report = await request(app)
+      .post(`/api/agent/assignments/${ready.assignment_id}/reports`)
+      .send({
+        assignment_token: token,
+        report_type: 'dispatch_receipt',
+        idempotency_key: 'review-stage-receipt-accepted',
+        receipt: {
+          dispatch_id: ready.dispatch_id,
+          ticket_id: ticket.id,
+          stage: 'review',
+          agent: 'leoss',
+          decision: 'accepted',
+          message: '已收到 review 阶段 assignment，继续验收。',
+        },
+      })
+      .expect(201);
+
+    expect(report.body.assignment_status).toBe('in_progress');
+    expect(report.body.interpreter_result.transition_preview).toEqual(expect.objectContaining({
+      action: null,
+      suggested_status: 'review',
+      applied: false,
+      bridge_actions: [],
+    }));
+
+    const ticketAfter = await request(app).get(`/api/tickets/${ticket.id}`).expect(200);
+    expect(ticketAfter.body.status).toBe('review');
+    expect(ticketAfter.body.dispatch_state).toBe('receipt_accepted');
+
+    const readyAgain = await request(app)
+      .get('/api/dispatch/ready')
+      .expect(200);
+    expect(readyAgain.body.ready.find((item) => item.ticket_id === ticket.id)).toBeUndefined();
+  });
+
   it('receipt 超时后会暴露 timeout/retry 元数据，并允许重新派单', async () => {
     const { ticket, ready } = await createReadyAssignment({
       execution_mode: 'direct',

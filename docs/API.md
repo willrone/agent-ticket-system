@@ -463,6 +463,7 @@ http://127.0.0.1:8788/api
 - `dispatch_receipt`：
   - `decision=accepted && stage=queued`：推进 `start_work`（`queued -> running`）
   - `decision=accepted && stage=done`：推进 `start_review`（`done -> review`）
+  - `decision=accepted && stage=review`：**不再推进新状态**；仅表示 reviewer 已正式接单，平台记录 receipt、停止重派，并保持 `review`
   - 非 `accepted`：只记录 receipt/comment，不推进状态
 - `execution_completed` / `review_submission`：
   - `queued`：自动桥接 `start_work -> submit_for_review`

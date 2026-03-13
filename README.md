@@ -206,9 +206,10 @@ curl -X POST http://127.0.0.1:8788/api/admin/ticket-sessions/cleanup \
 5. assignment 送达后先提交 `dispatch_receipt`；执行过程中继续仅使用 heartbeat / reports 回写，由平台解释为 comment / transition / notify
 
 ### report interpreter 当前桥接规则
-- `dispatch_receipt`：只有 `decision=accepted` 才推进 workflow
+- `dispatch_receipt`：只有 `decision=accepted` 才推进 workflow / 收口 reviewer 收单语义
   - `stage=queued`：推进 `start_work`（`queued -> running`）
   - `stage=done`：推进 `start_review`（`done -> review`）
+  - `stage=review`：不推进新状态，只把这次派单记为 reviewer 已正式接单并停止重派
   - 非 `accepted`：只记录 receipt/comment，不推进状态
 - `execution_completed` / `review_submission`：`queued` 会自动桥接 `start_work -> submit_for_review`，`running` 直接 `submit_for_review`
 - 但 `execution_mode=subagent/acp` 时，若 `ticket.worker_stats/current_workers/execution_workers` 看不到真实 worker 证据，则不会自动提审
