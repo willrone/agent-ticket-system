@@ -75,6 +75,11 @@ import {
 import { interpretAgentReport } from './report-interpreter.js';
 import { getRuntimeVersion } from './runtime-version.js';
 import { validateAssignmentWrite } from './assignment-write-validation.js';
+import { validateDispatchAdvanceChain } from './dispatch-advance-chain.js';
+import {
+  validateTicketPlatformAssignedAgent,
+  resolveTicketPlatformAssignedAgent,
+} from './ticket-platform-rules.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -583,9 +588,10 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
     }
   }
 
+  const requestedAgent = normalizeOptionalAgent(assigned_agent ?? agent);
   const targetAgent = agentFacing
-    ? (normalizeOptionalAgent(assigned_agent ?? agent) ?? actor)
-    : (normalizeOptionalAgent(assigned_agent ?? agent) ?? 'donky');
+    ? (resolveTicketPlatformAssignedAgent(platform, requestedAgent, { defaultToExecutor: true }) ?? actor)
+    : (resolveTicketPlatformAssignedAgent(platform, requestedAgent, { defaultToExecutor: true }) ?? 'donky');
 
   if (agentFacing && targetAgent !== actor) {
     return {
@@ -596,6 +602,20 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
         message: 'assigned_agent 只能留空或等于 actor',
         actor,
         assigned_agent: targetAgent,
+      },
+    };
+  }
+
+  const platformAgentValidation = validateTicketPlatformAssignedAgent(platform, targetAgent);
+  if (!platformAgentValidation.ok) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: platformAgentValidation.error,
+        message: platformAgentValidation.message,
+        platform: platformAgentValidation.platform,
+        allowed_assigned_agents: platformAgentValidation.allowed_assigned_agents,
       },
     };
   }
@@ -932,18 +952,52 @@ function hasReviewSubmissionForAssignment(assignmentId) {
   return reports.some((report) => String(report?.report_type || '').trim() === 'review_submission');
 }
 
+function buildParentChildSummary(ticket = {}) {
+  const childTickets = Array.isArray(ticket.child_tickets) ? ticket.child_tickets : [];
+  const byStatus = {};
+  const blockingChildren = [];
+
+  childTickets.forEach((child) => {
+    const status = String(child?.status || 'unknown').trim() || 'unknown';
+    byStatus[status] = (byStatus[status] || 0) + 1;
+    if (!['complete', 'failed'].includes(status)) {
+      blockingChildren.push({
+        id: child.id,
+        title: child.title,
+        status: child.status,
+        assigned_agent: child.assigned_agent || null,
+        result_summary: child.result_summary || null,
+        last_update: child.last_update || null,
+      });
+    }
+  });
+
+  return {
+    is_parent: childTickets.length > 0,
+    has_parent: Boolean(ticket.parent_ticket_id),
+    parent_ticket_id: ticket.parent_ticket_id || null,
+    child_count: childTickets.length,
+    terminal_child_count: childTickets.length - blockingChildren.length,
+    open_child_count: blockingChildren.length,
+    all_children_terminal: childTickets.length > 0 ? blockingChildren.length === 0 : true,
+    by_status: byStatus,
+    blocking_children: blockingChildren,
+  };
+}
+
 function buildWorkboardRelationSummary(ticket = {}, dependencyCount = 0) {
   const relations = Array.isArray(ticket.ticket_relations) ? ticket.ticket_relations : [];
   const supplementalTickets = Array.isArray(ticket.supplemental_tickets) ? ticket.supplemental_tickets : [];
-  const childTickets = Array.isArray(ticket.child_tickets) ? ticket.child_tickets : [];
+  const parentChildSummary = buildParentChildSummary(ticket);
   return {
-    has_parent: Boolean(ticket.parent_ticket_id),
-    parent_ticket_id: ticket.parent_ticket_id || null,
+    has_parent: parentChildSummary.has_parent,
+    parent_ticket_id: parentChildSummary.parent_ticket_id,
     dependency_count: dependencyCount,
-    child_count: childTickets.length,
+    child_count: parentChildSummary.child_count,
     related_count: relations.length,
     supplemental_count: supplementalTickets.length,
     supplemental_summary: ticket.supplemental_summary || { total: 0, open: 0, complete: 0, pending_review: 0, by_status: {} },
+    parent_child_summary: parentChildSummary,
   };
 }
 
@@ -1285,6 +1339,14 @@ function buildExecutionGuard(ticket = {}) {
     };
   }
 
+  if (ticket.status === 'running') {
+    return {
+      ...guard,
+      suppress_dispatch: false,
+      reason: 'running_assignment_refresh',
+    };
+  }
+
   if ((ticket.execution_mode || 'direct') === 'direct') {
     return {
       ...guard,
@@ -1304,11 +1366,17 @@ function enrichTicketForApi(ticket = {}) {
   const enriched = enrichTicketRouting(ticket);
   const executionGuard = buildExecutionGuard(enriched);
   const dispatchHandshake = buildDispatchHandshakeProjection(enriched);
-  return {
+  const withGuards = {
     ...enriched,
     ...dispatchHandshake,
     should_notify: executionGuard.suppress_dispatch ? false : enriched.should_notify,
     execution_guard: executionGuard,
+  };
+  const parent_child_summary = buildParentChildSummary(withGuards);
+  return {
+    ...withGuards,
+    parent_child_summary,
+    advance_chain: validateDispatchAdvanceChain(withGuards),
   };
 }
 
@@ -1430,6 +1498,7 @@ function buildAssignmentLiveAcceptanceVerdict({ assignment, ticket, expected = {
   const expectedBundleChecksum = parseExpectedString(expected.bundle_checksum_sha256);
   const expectedWorkflowVersion = parseExpectedString(expected.workflow_schema_version);
   const expectedApiBaseUrl = parseExpectedString(expected.api_base_url);
+  const advanceChain = validateDispatchAdvanceChain(ticket);
 
   const checks = [
     {
@@ -1441,6 +1510,16 @@ function buildAssignmentLiveAcceptanceVerdict({ assignment, ticket, expected = {
         ? `live workflow schema_version=${workflow.schema_version}，预期=${expectedWorkflowVersion}`
         : `workflow schema_version=${workflow.schema_version}`,
       source: '/api/v1/agent/workflow/schema',
+    },
+    {
+      key: 'advance-chain',
+      status: advanceChain.ok ? 'pass' : 'fail',
+      actual: advanceChain,
+      expected: { ok: true },
+      detail: advanceChain.ok
+        ? `stage=${ticket.status} 存在合法推进链，dispatch_actor=${advanceChain.dispatch_actor || 'null'}`
+        : advanceChain.message || `stage=${ticket.status} 缺少合法推进链`,
+      source: '/api/dispatch/ready + workflow schema/action bridge',
     },
     {
       key: 'runtime-context',
@@ -1511,7 +1590,7 @@ function buildAssignmentLiveAcceptanceVerdict({ assignment, ticket, expected = {
     verdict = 'dependency-not-closed';
   } else if (checks.some((item) => item.key === 'hosted-skill-bundle' && item.status === 'fail')) {
     verdict = 'live-not-upgraded';
-  } else if (checks.some((item) => ['workflow-schema', 'runtime-context'].includes(item.key) && item.status === 'fail')) {
+  } else if (checks.some((item) => ['workflow-schema', 'runtime-context', 'advance-chain'].includes(item.key) && item.status === 'fail')) {
     verdict = 'contract-mismatch';
   } else if (checks.some((item) => item.status === 'warn')) {
     verdict = 'partial';
@@ -1643,6 +1722,7 @@ function buildAgentDispatchMessage({ ticket, agent, assignment }) {
     `请立即使用 ticket-handler skill 处理，并把【当前阶段】自行闭环推进到【下一阶段】。`,
     '',
     stageGuidance,
+    ...(String(ticket.execution_mode || '').trim() && ['subagent', 'acp'].includes(String(ticket.execution_mode || '').trim()) ? ['', '重要：若本单目标是实现 / 修复 / 回归闭环，不允许只派一次性 analysis 子代理；必须用 Loop skill（或等价迭代控制）持续驱动子代理，多次尝试直到达到当前阶段走单标准、显式达到迭代上限，或确认需要人工决策。'] : []),
     '',
     `不要等老大再追问。若遇到需要老大决策的关键问题，先写工单评论，再主动通知老大。`,
   ];
@@ -1989,6 +2069,18 @@ app.patch('/api/tickets/:id', (req, res) => {
       .filter(Boolean)
       .slice(0, 100);
   }
+  const effectivePlatform = updates.platform !== undefined ? updates.platform : ticket.platform;
+  const effectiveAssignedAgent = updates.assigned_agent !== undefined ? updates.assigned_agent : ticket.assigned_agent;
+  const patchAgentValidation = validateTicketPlatformAssignedAgent(effectivePlatform, effectiveAssignedAgent);
+  if (!patchAgentValidation.ok) {
+    return res.status(400).json({
+      error: patchAgentValidation.error,
+      message: patchAgentValidation.message,
+      platform: patchAgentValidation.platform,
+      allowed_assigned_agents: patchAgentValidation.allowed_assigned_agents,
+    });
+  }
+
   updates.last_update = new Date().toISOString();
 
   const statusChanged = updates.status !== undefined && updates.status !== ticket.status;
@@ -2005,11 +2097,22 @@ app.patch('/api/tickets/:id', (req, res) => {
 // POST /api/tickets/:id/dispatch - 手动重派（仅更新 assigned_agent 和状态，不调用 OpenClaw）
 app.post('/api/tickets/:id/dispatch', (req, res) => {
   const id = req.params.id;
-  const agent = req.body?.agent || 'donky';
   const ticket = store.getTicketById(id);
   if (!ticket) {
     return res.status(404).json({ error: 'Ticket not found', message: '工单不存在' });
   }
+
+  const agent = resolveTicketPlatformAssignedAgent(ticket.platform, req.body?.agent, { defaultToExecutor: true }) || 'donky';
+  const dispatchAgentValidation = validateTicketPlatformAssignedAgent(ticket.platform, agent);
+  if (!dispatchAgentValidation.ok) {
+    return res.status(400).json({
+      error: dispatchAgentValidation.error,
+      message: dispatchAgentValidation.message,
+      platform: dispatchAgentValidation.platform,
+      allowed_assigned_agents: dispatchAgentValidation.allowed_assigned_agents,
+    });
+  }
+
   const statusChanged = ticket.status !== 'queued';
   store.updateTicket(id, {
     status: 'queued',
@@ -2271,6 +2374,10 @@ app.get('/api/dispatch/ready', (req, res) => {
       // 依赖门禁：检查是否有未满足的依赖
       if (store.hasUnmetDependencies(ticket.id)) {
         console.log(`[dispatch/ready] Skip #${ticket.id}: unmet dependencies`);
+        continue;
+      }
+      if (ticket.advance_chain && ticket.advance_chain.ok === false) {
+        console.log(`[dispatch/ready] Skip #${ticket.id}: invalid advance chain (${ticket.advance_chain.code || 'unknown'})`);
         continue;
       }
       if (ticket.status === 'queued') {
@@ -2772,16 +2879,17 @@ app.get('/api/tickets/:id/dependencies', (req, res) => {
 
 // ── Audit API（平台巡检长期未动工单）──
 
-const AUDIT_STALE_TRIAGE_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_TRIAGE_MINUTES) || 30;
-const AUDIT_STALE_RUNNING_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_RUNNING_MINUTES) || 30;
+const AUDIT_STALE_TRIAGE_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_TRIAGE_MINUTES) || 5;
+const AUDIT_STALE_RUNNING_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_RUNNING_MINUTES) || 10;
 const AUDIT_STALE_PAUSED_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_PAUSED_MINUTES) || 240;
-const AUDIT_STALE_DONE_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_DONE_MINUTES) || 30;
+const AUDIT_STALE_DONE_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_DONE_MINUTES) || 10;
 const AUDIT_STALE_REVIEW_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_REVIEW_MINUTES) || 10;
 const AUDIT_STALE_PENDING_DECISION_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_PENDING_DECISION_MINUTES) || 720;
 const AUDIT_STALE_BLOCKED_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_BLOCKED_MINUTES) || 240;
 const AUDIT_REQUEST_RETRY_MINUTES = parsePositiveInt(process.env.AUDIT_REQUEST_RETRY_MINUTES) || 30;
-const QUEUED_NUDGE_STALE_MINUTES = parsePositiveInt(process.env.QUEUED_NUDGE_STALE_MINUTES) || 30;
-const TICKET_NUDGE_THROTTLE_MINUTES = parsePositiveInt(process.env.TICKET_NUDGE_THROTTLE_MINUTES) || 60;
+const QUEUED_NUDGE_STALE_MINUTES = parsePositiveInt(process.env.QUEUED_NUDGE_STALE_MINUTES) || 10;
+const AUDIT_STALE_QUEUED_AFTER_RECEIPT_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_QUEUED_AFTER_RECEIPT_MINUTES) || 10;
+const TICKET_NUDGE_THROTTLE_MINUTES = parsePositiveInt(process.env.TICKET_NUDGE_THROTTLE_MINUTES) || 10;
 
 const AUDIT_THRESHOLDS = {
   triage: AUDIT_STALE_TRIAGE_MINUTES,
@@ -2960,6 +3068,10 @@ function buildAuditResultCommentContent(ticket, auditResult) {
 
 function buildQueuedStaleNudgeMessage({ ticket, agent, staleMinutes }) {
   const assignment = store.findLatestAssignmentForTicket(ticket.id, agent);
+  const waitingForWorker = ticket.dispatch_state === 'receipt_accepted'
+    && ticket.last_dispatch_receipt_decision === 'accepted'
+    && !(ticket.execution_guard?.has_worker_evidence)
+    && Number(ticket.execution_guard?.active_workers || 0) <= 0;
   const base = [
     `⏰ [queued_stale 催办]`,
     ``,
@@ -2968,7 +3080,9 @@ function buildQueuedStaleNudgeMessage({ ticket, agent, staleMinutes }) {
     `当前责任人：${agent}`,
     `已滞留：${Math.round(staleMinutes)} 分钟（超过 queued 催办阈值 ${QUEUED_NUDGE_STALE_MINUTES} 分钟）`,
     ``,
-    `请尽快开工；如果无法开工，请先补评论说明原因，再按需要 transition。`,
+    waitingForWorker
+      ? `当前已接单成功，但仍未开工成功（receipt accepted 且暂无 worker / running 证据）。请尽快补齐开工前置条件；若无法开工，请明确回写 blocked / pending_decision / failed。`
+      : `请尽快开工；如果无法开工，请先补评论说明原因，再按需要 transition。`,
   ];
 
   if (assignment) {
@@ -3111,7 +3225,11 @@ function collectQueuedStaleNudges(allTickets) {
   for (const ticket of allTickets) {
     if (ticket.status !== 'queued') continue;
     if (ticket.execution_guard?.suppress_dispatch) continue;
-    if (ticket.dispatch_state === 'receipt_accepted' && ticket.last_dispatch_receipt_decision === 'accepted') continue;
+    // 仅当「已接单且已真正开工」时跳过催办；接单但未开工（如 requires_worker 且无 worker evidence）在阈值后仍进入 queued_stale 催办
+    if (ticket.dispatch_state === 'receipt_accepted' && ticket.last_dispatch_receipt_decision === 'accepted') {
+      const effectivelyStarted = !ticket.execution_guard?.requires_worker || ticket.execution_guard?.has_worker_evidence;
+      if (effectivelyStarted) continue;
+    }
     if (store.hasUnmetDependencies(ticket.id)) continue;
 
     const agent = normalizeOptionalAgent(ticket.assigned_agent || ticket.next_actor);
@@ -3217,13 +3335,23 @@ app.get('/api/audits/ready', (req, res) => {
 
   const ready = [];
   for (const ticket of allTickets) {
-    const threshold = AUDIT_THRESHOLDS[ticket.status];
+    const isQueuedAcceptedPendingStart = ticket.status === 'queued'
+      && ticket.dispatch_state === 'receipt_accepted'
+      && ticket.last_dispatch_receipt_decision === 'accepted'
+      && !(ticket.execution_guard?.has_worker_evidence)
+      && Number(ticket.execution_guard?.active_workers || 0) <= 0;
+
+    const threshold = isQueuedAcceptedPendingStart
+      ? AUDIT_STALE_QUEUED_AFTER_RECEIPT_MINUTES
+      : AUDIT_THRESHOLDS[ticket.status];
     if (!threshold) continue;
 
     const staleMinutes = computeTicketStaleMinutes(ticket, now);
     if (!Number.isFinite(staleMinutes) || staleMinutes < threshold) continue;
 
-    const auditType = `stale_${ticket.status}`;
+    const auditType = isQueuedAcceptedPendingStart
+      ? 'stale_queued_after_receipt'
+      : `stale_${ticket.status}`;
     if (dispatch.hasResolvedAudit(ticket.id, auditType)) continue;
 
     const pendingAudit = dispatch.getPendingAuditEvent(ticket.id, auditType);
@@ -3621,6 +3749,7 @@ agentRouter.get('/workboards/stock-tickets', (req, res) => {
   const workboardSpec = buildAgentWorkboards({ apiBaseUrl: getAgentApiBaseUrl() }).find((item) => item.key === 'stock-tickets');
 
   const allStockItems = store.getAllTickets()
+    .map((ticket) => store.getTicketById(ticket.id) || ticket)
     .map((ticket) => enrichTicketForApi(ticket))
     .filter((ticket) => ticket.platform === 'stock-platform')
     .map((ticket) => {
