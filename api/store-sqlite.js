@@ -134,6 +134,17 @@ function parseJsonObject(value, fallback = {}) {
   }
 }
 
+function parseReviewPlanReviewState(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'object') return value;
+  try {
+    const p = JSON.parse(value);
+    return p && typeof p === 'object' ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 function makeStoreError(code, message, extra = {}) {
   const err = new Error(message);
   err.code = code;
@@ -186,6 +197,26 @@ function buildReportId() {
 
 function buildAssignmentToken() {
   return randomBytes(24).toString('base64url');
+}
+
+function executionReservationRowToShape(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    lane_key: row.lane_key,
+    agent_id: row.agent_id,
+    ticket_id: row.ticket_id,
+    assignment_id: row.assignment_id ?? null,
+    dispatch_event_id: row.dispatch_event_id ?? null,
+    state: row.state,
+    holder_kind: row.holder_kind ?? null,
+    holder_key: row.holder_key ?? null,
+    release_reason: row.release_reason ?? null,
+    released_at: row.released_at ?? null,
+    expires_at: row.expires_at ?? null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
 }
 
 function assignmentRowToShape(row) {
@@ -337,6 +368,8 @@ function initSchema(database) {
       constraints_text TEXT,
       deliverables TEXT,
       acceptance_criteria TEXT,
+      review_plan_json TEXT,
+      review_state_json TEXT,
       parent_ticket_id INTEGER,
       session_key TEXT,
       run_id TEXT,
@@ -434,6 +467,26 @@ function initSchema(database) {
       UNIQUE(dispatch_event_id),
       FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS execution_reservations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lane_key TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      ticket_id INTEGER NOT NULL,
+      assignment_id TEXT,
+      dispatch_event_id INTEGER,
+      state TEXT NOT NULL,
+      holder_kind TEXT,
+      holder_key TEXT,
+      release_reason TEXT,
+      released_at TEXT,
+      expires_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(lane_key, agent_id),
+      UNIQUE(ticket_id),
+      FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
+      FOREIGN KEY (assignment_id) REFERENCES ticket_assignments(assignment_id) ON DELETE SET NULL
+    );
     CREATE TABLE IF NOT EXISTS ticket_assignment_heartbeats (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       assignment_id TEXT NOT NULL,
@@ -458,7 +511,139 @@ function initSchema(database) {
       FOREIGN KEY (assignment_id) REFERENCES ticket_assignments(assignment_id) ON DELETE CASCADE,
       FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS domain_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL UNIQUE,
+      event_type TEXT NOT NULL,
+      aggregate_type TEXT NOT NULL,
+      aggregate_id TEXT NOT NULL,
+      aggregate_version INTEGER NOT NULL,
+      producer TEXT NOT NULL,
+      correlation_id TEXT,
+      causation_id TEXT,
+      idempotency_key TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      occurred_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS commands (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      command_id TEXT NOT NULL UNIQUE,
+      command_type TEXT NOT NULL,
+      aggregate_type TEXT NOT NULL,
+      aggregate_id TEXT NOT NULL,
+      issuer_kind TEXT,
+      issuer_id TEXT,
+      correlation_id TEXT,
+      idempotency_key TEXT,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      result_status TEXT,
+      result_error_code TEXT,
+      result_error_message TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS event_subscriptions (
+      subscriber_name TEXT PRIMARY KEY,
+      last_event_id TEXT,
+      last_sequence INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS dispatch_ready_projection (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id INTEGER NOT NULL,
+      dispatch_id INTEGER NOT NULL,
+      assignment_id TEXT,
+      agent TEXT NOT NULL,
+      stage TEXT,
+      target_session_key TEXT,
+      target_gateway_id TEXT,
+      delivery_intent TEXT,
+      reason TEXT,
+      dedupe_key TEXT DEFAULT '',
+      escalation_tier TEXT,
+      kind TEXT,
+      workflow_mismatch_json TEXT,
+      message TEXT,
+      assignment_contract_json TEXT,
+      reset_session INTEGER DEFAULT 0,
+      session_reset_reason TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(ticket_id, agent, dedupe_key)
+    );
+    CREATE TABLE IF NOT EXISTS ticket_projection (
+      ticket_id INTEGER PRIMARY KEY,
+      status TEXT NOT NULL,
+      current_actor TEXT,
+      next_actor TEXT,
+      dispatch_state TEXT,
+      available_actions_json TEXT DEFAULT '[]',
+      worker_stats_json TEXT DEFAULT '{}',
+      latest_effective_worker_key TEXT,
+      aggregate_version INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS audit_ready_projection (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id INTEGER NOT NULL,
+      audit_id INTEGER NOT NULL,
+      audit_type TEXT NOT NULL,
+      status_snapshot TEXT,
+      stale_minutes INTEGER,
+      suggested_status TEXT,
+      suggested_actor TEXT,
+      suggested_action TEXT,
+      reason TEXT,
+      confidence TEXT,
+      summary TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(ticket_id, audit_type)
+    );
+    CREATE TABLE IF NOT EXISTS worker_projection (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id INTEGER NOT NULL,
+      worker_key TEXT NOT NULL,
+      worker_type TEXT,
+      status TEXT NOT NULL,
+      session_key TEXT,
+      run_id TEXT,
+      started_at TEXT,
+      last_heartbeat_at TEXT,
+      finished_at TEXT,
+      replacement_for TEXT,
+      is_latest INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(ticket_id, worker_key)
+    );
+    CREATE TABLE IF NOT EXISTS validation_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      at TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      assignment_id TEXT,
+      ticket_id INTEGER,
+      passed INTEGER NOT NULL DEFAULT 1,
+      errors_json TEXT DEFAULT '[]',
+      codes_json TEXT DEFAULT '[]',
+      stale INTEGER,
+      stale_reason TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_domain_events_aggregate ON domain_events(aggregate_type, aggregate_id);
+    CREATE INDEX IF NOT EXISTS idx_domain_events_occurred ON domain_events(occurred_at);
+    CREATE INDEX IF NOT EXISTS idx_domain_events_idempotency ON domain_events(idempotency_key);
+    CREATE INDEX IF NOT EXISTS idx_commands_aggregate ON commands(aggregate_type, aggregate_id);
+    CREATE INDEX IF NOT EXISTS idx_dispatch_ready_projection_ticket ON dispatch_ready_projection(ticket_id);
+    CREATE INDEX IF NOT EXISTS idx_worker_projection_ticket ON worker_projection(ticket_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_ready_projection_ticket ON audit_ready_projection(ticket_id);
+    CREATE INDEX IF NOT EXISTS idx_validation_audit_assignment ON validation_audit(assignment_id);
+    CREATE INDEX IF NOT EXISTS idx_validation_audit_ticket ON validation_audit(ticket_id);
+    CREATE INDEX IF NOT EXISTS idx_execution_reservations_agent_state ON execution_reservations(agent_id, state);
+    CREATE INDEX IF NOT EXISTS idx_execution_reservations_ticket ON execution_reservations(ticket_id);
+  `);
+  ensureColumn(database, 'audit_ready_projection', 'stale_minutes', 'INTEGER');
 
   // 向后兼容老 schema：先补列，再建依赖这些列的索引
   ensureColumn(database, 'tickets', 'watchers_json', "TEXT DEFAULT '[]'");
@@ -479,10 +664,14 @@ function initSchema(database) {
   ensureColumn(database, 'tickets', 'constraints_text', 'TEXT');
   ensureColumn(database, 'tickets', 'deliverables', 'TEXT');
   ensureColumn(database, 'tickets', 'acceptance_criteria', 'TEXT');
+  ensureColumn(database, 'tickets', 'review_plan_json', "TEXT DEFAULT '{}'" );
+  ensureColumn(database, 'tickets', 'review_state_json', "TEXT DEFAULT '{}'" );
   ensureColumn(database, 'tickets', 'parent_ticket_id', 'INTEGER');
   ensureColumn(database, 'tickets', 'decision_owner', 'TEXT');
   ensureColumn(database, 'tickets', 'decision_summary', 'TEXT');
   ensureColumn(database, 'tickets', 'decision_context', 'TEXT');
+  ensureColumn(database, 'tickets', 'review_plan', 'TEXT');
+  ensureColumn(database, 'tickets', 'review_state', 'TEXT');
   ensureColumn(database, 'tickets', 'execution_mode', 'TEXT');
   ensureColumn(database, 'tickets', 'execution_mode_source', 'TEXT');
   ensureColumn(database, 'tickets', 'execution_rule_key', 'TEXT');
@@ -627,6 +816,183 @@ function getTicketRelationsForTicket(database, ticketId) {
   };
 }
 
+export function getExecutionReservationForTicket(ticketId) {
+  const database = getDb();
+  const row = database.prepare(`
+    SELECT * FROM execution_reservations WHERE ticket_id = ? LIMIT 1
+  `).get(Number(ticketId));
+  return executionReservationRowToShape(row);
+}
+
+export function findExecutionReservationConflict({ agentId, excludeTicketId = null } = {}) {
+  const normalizedAgent = String(agentId || '').trim();
+  if (!normalizedAgent) return null;
+
+  const database = getDb();
+  const row = database.prepare(`
+    SELECT * FROM execution_reservations
+    WHERE agent_id = ?
+      AND state IN ('reserved', 'receipt_accepted', 'running')
+      AND (? IS NULL OR ticket_id != ?)
+    ORDER BY datetime(created_at) ASC, id ASC
+    LIMIT 1
+  `).get(normalizedAgent, excludeTicketId ?? null, excludeTicketId ?? null);
+
+  if (!row) return null;
+  const ticketRow = database.prepare('SELECT id, status FROM tickets WHERE id = ?').get(Number(row.ticket_id));
+  if (!ticketRow || !['queued', 'running'].includes(String(ticketRow.status || '').trim())) {
+    updateExecutionReservation(row.ticket_id, {
+      state: 'released',
+      release_reason: 'stale_ticket_state',
+      released_at: new Date().toISOString(),
+    });
+    return null;
+  }
+  return executionReservationRowToShape(row);
+}
+
+export function tryAcquireExecutionReservation(input = {}) {
+  const database = getDb();
+  const agentId = String(input.agent_id ?? input.agentId ?? '').trim();
+  const ticketId = Number(input.ticket_id ?? input.ticketId);
+  const laneKey = String(input.lane_key ?? input.laneKey ?? 'default').trim() || 'default';
+  if (!agentId) {
+    throw makeStoreError('RESERVATION_AGENT_REQUIRED', 'reservation 需要合法 agent_id', { statusCode: 400 });
+  }
+  if (!Number.isInteger(ticketId) || ticketId <= 0) {
+    throw makeStoreError('RESERVATION_TICKET_REQUIRED', 'reservation 需要合法 ticket_id', { statusCode: 400 });
+  }
+
+  const existingForTicket = getExecutionReservationForTicket(ticketId);
+  const nextState = input.state ?? 'reserved';
+  const nextAssignmentId = input.assignment_id ?? input.assignmentId ?? null;
+  const nextDispatchEventId = input.dispatch_event_id ?? input.dispatchEventId ?? null;
+  const nextHolderKind = input.holder_kind ?? 'dispatch';
+  const nextHolderKey = input.holder_key ?? String((input.dispatch_event_id ?? input.dispatchEventId ?? '') || '');
+  const nextExpiresAt = input.expires_at ?? input.expiresAt ?? null;
+
+  if (existingForTicket) {
+    if (existingForTicket.state === 'released') {
+      return updateExecutionReservation(ticketId, {
+        assignment_id: nextAssignmentId,
+        dispatch_event_id: nextDispatchEventId,
+        state: nextState,
+        holder_kind: nextHolderKind,
+        holder_key: nextHolderKey,
+        release_reason: null,
+        released_at: null,
+        expires_at: nextExpiresAt,
+      });
+    }
+    return existingForTicket;
+  }
+
+  const conflict = findExecutionReservationConflict({ agentId, excludeTicketId: ticketId });
+  if (conflict) {
+    throw makeStoreError('EXECUTION_RESERVATION_CONFLICT', `agent ${agentId} 已被 ticket #${conflict.ticket_id} 占用 execution reservation`, {
+      statusCode: 409,
+      conflict_reservation: conflict,
+    });
+  }
+
+  const now = new Date().toISOString();
+  try {
+    const info = database.prepare(`
+      INSERT INTO execution_reservations (
+        lane_key, agent_id, ticket_id, assignment_id, dispatch_event_id, state, holder_kind, holder_key,
+        release_reason, released_at, expires_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      laneKey,
+      agentId,
+      ticketId,
+      nextAssignmentId,
+      nextDispatchEventId,
+      nextState,
+      nextHolderKind,
+      nextHolderKey,
+      null,
+      null,
+      nextExpiresAt,
+      now,
+      now,
+    );
+    const row = database.prepare('SELECT * FROM execution_reservations WHERE id = ?').get(info.lastInsertRowid);
+    return executionReservationRowToShape(row);
+  } catch (err) {
+    const message = String(err?.message || '');
+    if (message.includes('UNIQUE constraint failed: execution_reservations.ticket_id')) {
+      const ticketReservation = getExecutionReservationForTicket(ticketId);
+      if (ticketReservation?.state === 'released') {
+        return updateExecutionReservation(ticketId, {
+          assignment_id: nextAssignmentId,
+          dispatch_event_id: nextDispatchEventId,
+          state: nextState,
+          holder_kind: nextHolderKind,
+          holder_key: nextHolderKey,
+          release_reason: null,
+          released_at: null,
+          expires_at: nextExpiresAt,
+        });
+      }
+      return ticketReservation;
+    }
+    if (message.includes('UNIQUE constraint failed: execution_reservations.lane_key, execution_reservations.agent_id')) {
+      const releasedLaneReservation = database.prepare(`
+        SELECT * FROM execution_reservations
+        WHERE lane_key = ? AND agent_id = ? AND state = 'released'
+        LIMIT 1
+      `).get(laneKey, agentId);
+      if (releasedLaneReservation) {
+        database.prepare('DELETE FROM execution_reservations WHERE id = ?').run(releasedLaneReservation.id);
+        return tryAcquireExecutionReservation(input);
+      }
+      const holderRow = database.prepare(`
+        SELECT * FROM execution_reservations WHERE lane_key = ? AND agent_id = ? LIMIT 1
+      `).get(laneKey, agentId);
+      throw makeStoreError('EXECUTION_RESERVATION_CONFLICT', `agent ${agentId} 已被其他 reservation 占用`, {
+        statusCode: 409,
+        conflict_reservation: holderRow ? executionReservationRowToShape(holderRow) : findExecutionReservationConflict({ agentId, excludeTicketId: ticketId }),
+      });
+    }
+    throw err;
+  }
+}
+
+export function updateExecutionReservation(ticketId, updates = {}) {
+  const database = getDb();
+  const existing = database.prepare('SELECT * FROM execution_reservations WHERE ticket_id = ?').get(Number(ticketId));
+  if (!existing) return null;
+
+  const allowed = ['assignment_id', 'dispatch_event_id', 'state', 'holder_kind', 'holder_key', 'release_reason', 'released_at', 'expires_at'];
+  const setParts = [];
+  const values = [];
+  for (const key of allowed) {
+    if (updates[key] !== undefined) {
+      setParts.push(`${key} = ?`);
+      values.push(updates[key]);
+    }
+  }
+  if (setParts.length === 0) {
+    return executionReservationRowToShape(existing);
+  }
+  setParts.push('updated_at = ?');
+  values.push(new Date().toISOString());
+  values.push(Number(ticketId));
+  database.prepare(`UPDATE execution_reservations SET ${setParts.join(', ')} WHERE ticket_id = ?`).run(...values);
+  return getExecutionReservationForTicket(ticketId);
+}
+
+export function releaseExecutionReservationByTicket(ticketId, releaseReason = 'released') {
+  const existing = getExecutionReservationForTicket(ticketId);
+  if (!existing) return null;
+  return updateExecutionReservation(ticketId, {
+    state: 'released',
+    release_reason: releaseReason,
+    released_at: new Date().toISOString(),
+  });
+}
+
 export function findRunningTicketConflict({ assignedAgent, excludeTicketId } = {}) {
   const normalizedAgent = String(assignedAgent || '').trim();
   if (!normalizedAgent) return null;
@@ -685,6 +1051,8 @@ function rowToTicket(row, comments = [], relations = {}, options = {}) {
     constraints: row.constraints_text ?? '',
     deliverables: row.deliverables ?? '',
     acceptance_criteria: row.acceptance_criteria ?? '',
+    review_plan: parseJsonObject(row.review_plan_json, {}),
+    review_state: parseJsonObject(row.review_state_json, {}),
     parent_ticket_id: row.parent_ticket_id ?? null,
     parent_ticket: relations.parent_ticket ?? null,
     child_tickets: Array.isArray(relations.child_tickets) ? relations.child_tickets : [],
@@ -792,6 +1160,8 @@ export function createTicket(ticket) {
       constraints_text,
       deliverables,
       acceptance_criteria,
+      review_plan_json,
+      review_state_json,
       parent_ticket_id,
       session_key,
       run_id,
@@ -812,7 +1182,7 @@ export function createTicket(ticket) {
       execution_matched_signals_json,
       max_active_workers
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const id = allocateId(database, 'tickets', 'tickets');
   stmt.run(
@@ -836,6 +1206,8 @@ export function createTicket(ticket) {
     ticket.constraints ?? '',
     ticket.deliverables ?? '',
     ticket.acceptance_criteria ?? '',
+    JSON.stringify(ticket.review_plan && typeof ticket.review_plan === 'object' ? ticket.review_plan : {}),
+    JSON.stringify(ticket.review_state && typeof ticket.review_state === 'object' ? ticket.review_state : {}),
     ticket.parent_ticket_id ?? null,
     ticket.session_key ?? null,
     ticket.run_id ?? null,
@@ -881,7 +1253,31 @@ export function createTicket(ticket) {
     });
     insertMany(comments);
   }
-  return getTicketById(id);
+  const createdTicket = getTicketById(id);
+  appendDomainEvent({
+    event_type: 'ticket.created',
+    aggregate_type: 'ticket',
+    aggregate_id: String(id),
+    aggregate_version: 1,
+    producer: 'store',
+    correlation_id: `ticket-${id}`,
+    causation_id: null,
+    idempotency_key: `ticket-${id}-created`,
+    payload: {
+      status: createdTicket?.status ?? ticket.status,
+      triage_owner: createdTicket?.triage_owner ?? ticket.triage_owner,
+      assigned_agent: createdTicket?.assigned_agent ?? ticket.assigned_agent,
+      review_owner: createdTicket?.review_owner ?? ticket.review_owner,
+    },
+    occurred_at: now,
+  });
+  upsertTicketProjection(id, {
+    status: createdTicket?.status ?? ticket.status,
+    current_actor: createdTicket?.assigned_agent ?? ticket.assigned_agent ?? null,
+    next_actor: createdTicket?.next_actor ?? ticket.next_actor ?? null,
+    aggregate_version: 1,
+  });
+  return createdTicket;
 }
 
 export function updateTicket(id, updates) {
@@ -892,9 +1288,10 @@ export function updateTicket(id, updates) {
   const directAllowed = [
     'title', 'description', 'status', 'triage_owner', 'review_owner', 'decision_owner', 'decision_summary', 'decision_context', 'assigned_agent', 'next_actor', 'next_actor_override', 'priority',
     'platform', 'request_type', 'triage_summary', 'implementation_scope',
-    'deliverables', 'acceptance_criteria', 'parent_ticket_id',
+    'deliverables', 'acceptance_criteria', 'review_plan_json', 'review_state_json', 'parent_ticket_id',
     'session_key', 'run_id', 'result_summary', 'error', 'last_update', 'locked_by', 'locked_at',
     'paused_from_status', 'paused_by', 'paused_at', 'pause_reason',
+    'review_plan', 'review_state',
   ];
   const mappedAllowed = {
     constraints: 'constraints_text',
@@ -904,7 +1301,8 @@ export function updateTicket(id, updates) {
   for (const key of directAllowed) {
     if (updates[key] !== undefined) {
       setParts.push(`${key} = ?`);
-      values.push(updates[key]);
+      const v = updates[key];
+      values.push((key === 'review_plan' || key === 'review_state') && v !== null && typeof v === 'object' ? JSON.stringify(v) : v);
     }
   }
   for (const [inputKey, columnName] of Object.entries(mappedAllowed)) {
@@ -1144,6 +1542,29 @@ export function registerExecutionWorker(ticketId, worker = {}) {
   }
 
   database.prepare('UPDATE tickets SET last_update = ? WHERE id = ?').run(now, ticket.id);
+  const aggregateId = `ticket:${ticket.id}:${workerKey}`;
+  const version = getAggregateVersion('worker', aggregateId) + 1;
+  appendDomainEvent({
+    event_type: 'worker.started',
+    aggregate_type: 'worker',
+    aggregate_id: aggregateId,
+    aggregate_version: version,
+    producer: 'worker-registry',
+    correlation_id: `ticket-${ticket.id}`,
+    causation_id: null,
+    idempotency_key: `worker-${ticket.id}-${workerKey}-started`,
+    payload: { ticket_id: ticket.id, worker_key: workerKey, worker_type: validation.worker_type, status, session_key: worker.session_key ?? null, run_id: worker.run_id ?? null, started_at: worker.started_at ?? now },
+    occurred_at: now,
+  });
+  upsertWorkerProjection(ticket.id, workerKey, {
+    worker_type: validation.worker_type,
+    status,
+    session_key: worker.session_key ?? null,
+    run_id: worker.run_id ?? null,
+    started_at: worker.started_at ?? now,
+    last_heartbeat_at: isExecutionWorkerActiveStatus(status) ? (worker.last_heartbeat_at ?? now) : null,
+    finished_at: worker.finished_at ?? null,
+  });
   return getExecutionWorker(ticket.id, workerKey);
 }
 
@@ -1229,6 +1650,42 @@ export function updateExecutionWorker(ticketId, workerKey, updates = {}) {
   );
 
   database.prepare('UPDATE tickets SET last_update = ? WHERE id = ?').run(now, ticket.id);
+  const aggregateId = `ticket:${ticketId}:${workerKey}`;
+  const version = getAggregateVersion('worker', aggregateId) + 1;
+  const eventType = nextStatus === 'finished' || nextStatus === 'failed' || nextStatus === 'cancelled'
+    ? (nextStatus === 'failed' ? 'worker.failed' : 'worker.finished')
+    : (updates.last_heartbeat_at !== undefined || nextActive ? 'worker.heartbeat' : null);
+  if (eventType) {
+    appendDomainEvent({
+      event_type: eventType,
+      aggregate_type: 'worker',
+      aggregate_id: aggregateId,
+      aggregate_version: version,
+      producer: 'worker-registry',
+      correlation_id: `ticket-${ticketId}`,
+      causation_id: null,
+      idempotency_key: `worker-${ticketId}-${workerKey}-${eventType}-${now}`,
+      payload: {
+        ticket_id: Number(ticketId),
+        worker_key: workerKey,
+        status: nextStatus,
+        session_key: updates.session_key !== undefined ? updates.session_key : existing.session_key,
+        run_id: updates.run_id !== undefined ? updates.run_id : existing.run_id,
+        last_heartbeat_at: updates.last_heartbeat_at !== undefined ? updates.last_heartbeat_at : (nextActive ? now : existing.last_heartbeat_at),
+        finished_at: updates.finished_at !== undefined ? updates.finished_at : (nextActive ? null : existing.finished_at || now),
+      },
+      occurred_at: now,
+    });
+  }
+  upsertWorkerProjection(Number(ticketId), workerKey, {
+    worker_type: validation.worker_type,
+    status: nextStatus,
+    session_key: updates.session_key !== undefined ? updates.session_key : existing.session_key,
+    run_id: updates.run_id !== undefined ? updates.run_id : existing.run_id,
+    started_at: existing.started_at,
+    last_heartbeat_at: updates.last_heartbeat_at !== undefined ? updates.last_heartbeat_at : (nextActive ? now : existing.last_heartbeat_at),
+    finished_at: updates.finished_at !== undefined ? updates.finished_at : (nextActive ? null : existing.finished_at || now),
+  });
   return getExecutionWorker(ticket.id, workerKey);
 }
 
@@ -1511,6 +1968,454 @@ export function listAssignmentReports(assignmentId, { limit = 50 } = {}) {
   return database.prepare(`
     SELECT * FROM ticket_assignment_reports WHERE assignment_id = ? ORDER BY id DESC LIMIT ?
   `).all(String(assignmentId), Number(limit) || 50).map(reportRowToShape);
+}
+
+// ---------- 事件驱动：domain_events / commands / projections ----------
+
+function generateEventId() {
+  return `evt_${Date.now()}_${randomBytes(4).toString('hex')}`;
+}
+
+function generateCommandId() {
+  return `cmd_${Date.now()}_${randomBytes(4).toString('hex')}`;
+}
+
+/**
+ * Append a domain event. Idempotent by idempotency_key.
+ * @param {object} envelope - { event_id?, event_type, aggregate_type, aggregate_id, aggregate_version, producer, correlation_id?, causation_id?, idempotency_key, payload, occurred_at? }
+ * @returns {{ appended: boolean, event_id: string } | { idempotent: true, event_id: string }}
+ */
+export function appendDomainEvent(envelope = {}) {
+  const database = getDb();
+  const idempotencyKey = String(envelope.idempotency_key ?? '').trim();
+  if (!idempotencyKey) {
+    throw new Error('appendDomainEvent: idempotency_key is required');
+  }
+  const existing = database.prepare('SELECT event_id FROM domain_events WHERE idempotency_key = ?').get(idempotencyKey);
+  if (existing) {
+    return { idempotent: true, event_id: existing.event_id };
+  }
+  const eventId = envelope.event_id || generateEventId();
+  const occurredAt = envelope.occurred_at || new Date().toISOString();
+  const now = new Date().toISOString();
+  const payloadJson = typeof envelope.payload === 'object' ? JSON.stringify(envelope.payload ?? {}) : String(envelope.payload ?? '{}');
+  database.prepare(`
+    INSERT INTO domain_events (event_id, event_type, aggregate_type, aggregate_id, aggregate_version, producer, correlation_id, causation_id, idempotency_key, payload_json, occurred_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    eventId,
+    String(envelope.event_type ?? ''),
+    String(envelope.aggregate_type ?? ''),
+    String(envelope.aggregate_id ?? ''),
+    Number(envelope.aggregate_version ?? 0),
+    String(envelope.producer ?? ''),
+    envelope.correlation_id != null ? String(envelope.correlation_id) : null,
+    envelope.causation_id != null ? String(envelope.causation_id) : null,
+    idempotencyKey,
+    payloadJson,
+    occurredAt,
+    now,
+  );
+  return { appended: true, event_id: eventId };
+}
+
+/**
+ * Append a command log entry. Idempotent by command_id (or idempotency_key if provided and unique).
+ * @param {object} envelope - { command_id?, command_type, aggregate_type, aggregate_id, issuer_kind?, issuer_id?, correlation_id?, idempotency_key?, payload, result_status?, ... }
+ * @returns {{ appended: boolean, command_id: string } | { idempotent: true, command_id: string }}
+ */
+export function appendCommandLog(envelope = {}) {
+  const database = getDb();
+  const commandId = envelope.command_id || generateCommandId();
+  const existing = database.prepare('SELECT command_id FROM commands WHERE command_id = ?').get(commandId);
+  if (existing) {
+    return { idempotent: true, command_id: existing.command_id };
+  }
+  const idempotencyKey = envelope.idempotency_key != null ? String(envelope.idempotency_key) : null;
+  const existingByKey = idempotencyKey ? database.prepare('SELECT command_id FROM commands WHERE idempotency_key = ?').get(idempotencyKey) : null;
+  if (existingByKey) {
+    return { idempotent: true, command_id: existingByKey.command_id };
+  }
+  const now = new Date().toISOString();
+  const payloadJson = typeof envelope.payload === 'object' ? JSON.stringify(envelope.payload ?? {}) : String(envelope.payload ?? '{}');
+  const issuerKind = envelope.issuer?.kind ?? envelope.issuer_kind;
+  const issuerId = envelope.issuer?.id ?? envelope.issuer_id;
+  database.prepare(`
+    INSERT INTO commands (command_id, command_type, aggregate_type, aggregate_id, issuer_kind, issuer_id, correlation_id, idempotency_key, payload_json, result_status, result_error_code, result_error_message, created_at, finished_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    commandId,
+    String(envelope.command_type ?? ''),
+    String(envelope.aggregate_type ?? ''),
+    String(envelope.aggregate_id ?? ''),
+    issuerKind != null ? String(issuerKind) : null,
+    issuerId != null ? String(issuerId) : null,
+    envelope.correlation_id != null ? String(envelope.correlation_id) : null,
+    idempotencyKey,
+    payloadJson,
+    envelope.result_status ?? null,
+    envelope.result_error_code ?? null,
+    envelope.result_error_message ?? null,
+    now,
+    envelope.finished_at ?? null,
+  );
+  return { appended: true, command_id: commandId };
+}
+
+/**
+ * 追加一条 assignment write validation 审计记录
+ * @param {Object} entry - { at, kind, assignment_id, ticket_id, passed, errors, codes, stale, stale_reason }
+ * @returns {string|number} 审计记录 id
+ */
+export function appendValidationAudit(entry = {}) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  const at = entry.at || now;
+  const kind = String(entry.kind ?? 'unknown').slice(0, 64);
+  const assignmentId = entry.assignment_id != null ? String(entry.assignment_id) : null;
+  const ticketId = entry.ticket_id != null ? Number(entry.ticket_id) : null;
+  const passed = entry.passed === true ? 1 : 0;
+  const errorsJson = JSON.stringify(Array.isArray(entry.errors) ? entry.errors : []);
+  const codesJson = JSON.stringify(Array.isArray(entry.codes) ? entry.codes : []);
+  const stale = entry.stale === true ? 1 : entry.stale === false ? 0 : null;
+  const staleReason = entry.stale_reason != null ? String(entry.stale_reason).slice(0, 255) : null;
+  const info = database.prepare(`
+    INSERT INTO validation_audit (at, kind, assignment_id, ticket_id, passed, errors_json, codes_json, stale, stale_reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(at, kind, assignmentId, ticketId, passed, errorsJson, codesJson, stale, staleReason, now);
+  return info.lastInsertRowid;
+}
+
+/**
+ * Get a command by command_id.
+ */
+export function getCommandById(commandId) {
+  const database = getDb();
+  const row = database.prepare('SELECT * FROM commands WHERE command_id = ?').get(String(commandId));
+  if (!row) return null;
+  return {
+    command_id: row.command_id,
+    command_type: row.command_type,
+    aggregate_type: row.aggregate_type,
+    aggregate_id: row.aggregate_id,
+    issuer_kind: row.issuer_kind,
+    issuer_id: row.issuer_id,
+    correlation_id: row.correlation_id,
+    idempotency_key: row.idempotency_key,
+    payload: parseJsonObject(row.payload_json, {}),
+    result_status: row.result_status,
+    result_error_code: row.result_error_code,
+    result_error_message: row.result_error_message,
+    created_at: row.created_at,
+    finished_at: row.finished_at,
+  };
+}
+
+/**
+ * Get pending commands (result_status IS NULL), optionally by aggregate_type, limit.
+ */
+export function getPendingCommands(options = {}) {
+  const database = getDb();
+  const limit = Number(options.limit) || 50;
+  const aggregateType = options.aggregate_type;
+  let sql = 'SELECT * FROM commands WHERE result_status IS NULL';
+  const params = [];
+  if (aggregateType) {
+    sql += ' AND aggregate_type = ?';
+    params.push(String(aggregateType));
+  }
+  sql += ' ORDER BY created_at ASC LIMIT ?';
+  params.push(limit);
+  return database.prepare(sql).all(...params).map((row) => ({
+    command_id: row.command_id,
+    command_type: row.command_type,
+    aggregate_type: row.aggregate_type,
+    aggregate_id: row.aggregate_id,
+    issuer_kind: row.issuer_kind,
+    issuer_id: row.issuer_id,
+    correlation_id: row.correlation_id,
+    idempotency_key: row.idempotency_key,
+    payload: parseJsonObject(row.payload_json, {}),
+    result_status: row.result_status,
+    created_at: row.created_at,
+  }));
+}
+
+/**
+ * Update command result (e.g. after handler execution).
+ */
+export function updateCommandResult(commandId, result = {}) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  database.prepare(`
+    UPDATE commands
+    SET result_status = ?, result_error_code = ?, result_error_message = ?, finished_at = ?
+    WHERE command_id = ?
+  `).run(
+    result.result_status ?? null,
+    result.result_error_code ?? null,
+    result.result_error_message ?? null,
+    now,
+    String(commandId),
+  );
+}
+
+/**
+ * Get current aggregate version from domain_events for an aggregate (max aggregate_version).
+ */
+export function getAggregateVersion(aggregateType, aggregateId) {
+  const database = getDb();
+  const row = database.prepare(`
+    SELECT COALESCE(MAX(aggregate_version), 0) AS v FROM domain_events WHERE aggregate_type = ? AND aggregate_id = ?
+  `).get(String(aggregateType ?? ''), String(aggregateId ?? ''));
+  return Number(row?.v ?? 0);
+}
+
+/**
+ * Replace dispatch_ready_projection rows for a ticket (delete then insert) or insert one row.
+ */
+export function replaceDispatchReadyProjectionForTicket(ticketId, rows) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  database.prepare('DELETE FROM dispatch_ready_projection WHERE ticket_id = ?').run(Number(ticketId));
+  const insert = database.prepare(`
+    INSERT INTO dispatch_ready_projection (ticket_id, dispatch_id, assignment_id, agent, stage, target_session_key, target_gateway_id, delivery_intent, reason, dedupe_key, escalation_tier, kind, workflow_mismatch_json, message, assignment_contract_json, reset_session, session_reset_reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const r of Array.isArray(rows) ? rows : []) {
+    insert.run(
+      Number(ticketId),
+      Number(r.dispatch_id ?? 0),
+      r.assignment_id != null ? String(r.assignment_id) : null,
+      String(r.agent ?? ''),
+      r.stage != null ? String(r.stage) : null,
+      r.target_session_key != null ? String(r.target_session_key) : null,
+      r.target_gateway_id != null ? String(r.target_gateway_id) : null,
+      r.delivery_intent != null ? String(r.delivery_intent) : null,
+      r.reason != null ? String(r.reason) : null,
+      r.dedupe_key != null ? String(r.dedupe_key) : '',
+      r.escalation_tier != null ? String(r.escalation_tier) : null,
+      r.kind != null ? String(r.kind) : null,
+      r.workflow_mismatch != null ? JSON.stringify(r.workflow_mismatch) : null,
+      r.message != null ? String(r.message) : null,
+      r.assignment_contract != null ? JSON.stringify(r.assignment_contract) : null,
+      r.reset_session ? 1 : 0,
+      r.session_reset_reason != null ? String(r.session_reset_reason) : null,
+      now,
+    );
+  }
+}
+
+/**
+ * Replace entire dispatch_ready_projection with given rows (e.g. after building legacy ready).
+ */
+export function replaceAllDispatchReadyProjection(rows) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  database.prepare('DELETE FROM dispatch_ready_projection').run();
+  const insert = database.prepare(`
+    INSERT INTO dispatch_ready_projection (ticket_id, dispatch_id, assignment_id, agent, stage, target_session_key, target_gateway_id, delivery_intent, reason, dedupe_key, escalation_tier, kind, workflow_mismatch_json, message, assignment_contract_json, reset_session, session_reset_reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const r of Array.isArray(rows) ? rows : []) {
+    insert.run(
+      Number(r.ticket_id),
+      Number(r.dispatch_id ?? 0),
+      r.assignment_id != null ? String(r.assignment_id) : null,
+      String(r.agent ?? ''),
+      r.stage != null ? String(r.stage) : null,
+      r.target_session_key != null ? String(r.target_session_key) : null,
+      r.target_gateway_id != null ? String(r.target_gateway_id) : null,
+      r.delivery_intent != null ? String(r.delivery_intent) : null,
+      r.reason != null ? String(r.reason) : null,
+      r.dedupe_key != null ? String(r.dedupe_key) : '',
+      r.escalation_tier != null ? String(r.escalation_tier) : null,
+      r.kind != null ? String(r.kind) : null,
+      r.workflow_mismatch != null ? JSON.stringify(r.workflow_mismatch) : null,
+      r.message != null ? String(r.message) : null,
+      r.assignment != null ? JSON.stringify(r.assignment) : null,
+      r.reset_session ? 1 : 0,
+      r.session_reset_reason != null ? String(r.session_reset_reason) : null,
+      now,
+    );
+  }
+}
+
+export function getDispatchReadyProjection() {
+  const database = getDb();
+  return database.prepare(`
+    SELECT ticket_id, dispatch_id, assignment_id, agent, stage, target_session_key, target_gateway_id, delivery_intent, reason, dedupe_key, escalation_tier, kind, workflow_mismatch_json, message, assignment_contract_json, reset_session, session_reset_reason, created_at
+    FROM dispatch_ready_projection ORDER BY created_at ASC
+  `).all().map((row) => ({
+    ticket_id: row.ticket_id,
+    dispatch_id: row.dispatch_id,
+    assignment_id: row.assignment_id,
+    agent: row.agent,
+    stage: row.stage,
+    target_session_key: row.target_session_key,
+    target_gateway_id: row.target_gateway_id,
+    delivery_intent: row.delivery_intent,
+    reason: row.reason,
+    dedupe_key: row.dedupe_key || '',
+    escalation_tier: row.escalation_tier,
+    kind: row.kind,
+    workflow_mismatch: row.workflow_mismatch_json ? parseJsonObject(row.workflow_mismatch_json) : null,
+    message: row.message,
+    assignment: row.assignment_contract_json ? parseJsonObject(row.assignment_contract_json) : null,
+    reset_session: Boolean(row.reset_session),
+    session_reset_reason: row.session_reset_reason,
+    created_at: row.created_at,
+  }));
+}
+
+export function upsertTicketProjection(ticketId, data = {}) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  const version = Number(data.aggregate_version ?? getAggregateVersion('ticket', String(ticketId)));
+  const actionsJson = Array.isArray(data.available_actions) ? JSON.stringify(data.available_actions) : (typeof data.available_actions_json === 'string' ? data.available_actions_json : '[]');
+  const workerStatsJson = data.worker_stats && typeof data.worker_stats === 'object' ? JSON.stringify(data.worker_stats) : (data.worker_stats_json || '{}');
+  database.prepare(`
+    INSERT INTO ticket_projection (ticket_id, status, current_actor, next_actor, dispatch_state, available_actions_json, worker_stats_json, latest_effective_worker_key, aggregate_version, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(ticket_id) DO UPDATE SET
+      status = excluded.status,
+      current_actor = excluded.current_actor,
+      next_actor = excluded.next_actor,
+      dispatch_state = excluded.dispatch_state,
+      available_actions_json = excluded.available_actions_json,
+      worker_stats_json = excluded.worker_stats_json,
+      latest_effective_worker_key = excluded.latest_effective_worker_key,
+      aggregate_version = excluded.aggregate_version,
+      updated_at = excluded.updated_at
+  `).run(
+    Number(ticketId),
+    String(data.status ?? ''),
+    data.current_actor != null ? String(data.current_actor) : null,
+    data.next_actor != null ? String(data.next_actor) : null,
+    data.dispatch_state != null ? String(data.dispatch_state) : null,
+    actionsJson,
+    workerStatsJson,
+    data.latest_effective_worker_key != null ? String(data.latest_effective_worker_key) : null,
+    version,
+    now,
+  );
+}
+
+export function getTicketProjection(ticketId) {
+  const database = getDb();
+  const row = database.prepare('SELECT * FROM ticket_projection WHERE ticket_id = ?').get(Number(ticketId));
+  if (!row) return null;
+  return {
+    ticket_id: row.ticket_id,
+    status: row.status,
+    current_actor: row.current_actor,
+    next_actor: row.next_actor,
+    dispatch_state: row.dispatch_state,
+    available_actions: row.available_actions_json ? parseJsonObject(row.available_actions_json, []) : [],
+    worker_stats: row.worker_stats_json ? parseJsonObject(row.worker_stats_json, {}) : {},
+    latest_effective_worker_key: row.latest_effective_worker_key,
+    aggregate_version: row.aggregate_version,
+    updated_at: row.updated_at,
+  };
+}
+
+export function upsertWorkerProjection(ticketId, workerKey, data = {}) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  database.prepare(`
+    INSERT INTO worker_projection (ticket_id, worker_key, worker_type, status, session_key, run_id, started_at, last_heartbeat_at, finished_at, replacement_for, is_latest, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+    ON CONFLICT(ticket_id, worker_key) DO UPDATE SET
+      worker_type = excluded.worker_type,
+      status = excluded.status,
+      session_key = excluded.session_key,
+      run_id = excluded.run_id,
+      started_at = excluded.started_at,
+      last_heartbeat_at = excluded.last_heartbeat_at,
+      finished_at = excluded.finished_at,
+      replacement_for = excluded.replacement_for,
+      is_latest = 1,
+      updated_at = excluded.updated_at
+  `).run(
+    Number(ticketId),
+    String(workerKey ?? ''),
+    data.worker_type != null ? String(data.worker_type) : null,
+    String(data.status ?? ''),
+    data.session_key != null ? String(data.session_key) : null,
+    data.run_id != null ? String(data.run_id) : null,
+    data.started_at != null ? String(data.started_at) : null,
+    data.last_heartbeat_at != null ? String(data.last_heartbeat_at) : null,
+    data.finished_at != null ? String(data.finished_at) : null,
+    data.replacement_for != null ? String(data.replacement_for) : null,
+    now,
+  );
+}
+
+export function replaceAllAuditReadyProjection(rows) {
+  const database = getDb();
+  database.prepare('DELETE FROM audit_ready_projection').run();
+  const insert = database.prepare(`
+    INSERT INTO audit_ready_projection (ticket_id, audit_id, audit_type, status_snapshot, stale_minutes, suggested_status, suggested_actor, suggested_action, reason, confidence, summary, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const now = new Date().toISOString();
+  for (const r of Array.isArray(rows) ? rows : []) {
+    insert.run(
+      Number(r.ticket_id),
+      Number(r.audit_id ?? 0),
+      String(r.audit_type ?? ''),
+      r.status != null ? String(r.status) : null,
+      r.stale_minutes != null ? Number(r.stale_minutes) : null,
+      r.suggested_status ?? null,
+      r.suggested_actor ?? null,
+      r.suggested_action ?? null,
+      r.reason ?? null,
+      r.confidence ?? null,
+      r.summary ?? null,
+      now,
+    );
+  }
+}
+
+export function getAuditReadyProjection() {
+  const database = getDb();
+  return database.prepare(`
+    SELECT ticket_id, audit_id, audit_type, status_snapshot, stale_minutes, suggested_status, suggested_actor, suggested_action, reason, confidence, summary, created_at
+    FROM audit_ready_projection ORDER BY created_at ASC
+  `).all().map((row) => ({
+    ticket_id: row.ticket_id,
+    audit_id: row.audit_id,
+    audit_type: row.audit_type,
+    status: row.status_snapshot,
+    stale_minutes: row.stale_minutes,
+    suggested_status: row.suggested_status,
+    suggested_actor: row.suggested_actor,
+    suggested_action: row.suggested_action,
+    reason: row.reason,
+    confidence: row.confidence,
+    summary: row.summary,
+    created_at: row.created_at,
+  }));
+}
+
+export function getWorkerProjectionForTicket(ticketId) {
+  const database = getDb();
+  return database.prepare(`
+    SELECT ticket_id, worker_key, worker_type, status, session_key, run_id, started_at, last_heartbeat_at, finished_at, replacement_for, updated_at
+    FROM worker_projection WHERE ticket_id = ? AND is_latest = 1 ORDER BY updated_at DESC
+  `).all(Number(ticketId)).map((row) => ({
+    ticket_id: row.ticket_id,
+    worker_key: row.worker_key,
+    worker_type: row.worker_type,
+    status: row.status,
+    session_key: row.session_key,
+    run_id: row.run_id,
+    started_at: row.started_at,
+    last_heartbeat_at: row.last_heartbeat_at,
+    finished_at: row.finished_at,
+    replacement_for: row.replacement_for,
+    updated_at: row.updated_at,
+  }));
 }
 
 // 关系建模：补充验证 / smoke / review sample

@@ -1599,12 +1599,27 @@ function loadStockAdminTicket(req, res, capability = 'stock_tickets:read') {
   return { grant, ticket: enriched };
 }
 
+function buildStageAdvanceGuidance(ticket = {}) {
+  const stage = String(ticket?.status || '').trim();
+  const sharedPrefix = '重要：先按 hosted contract 回一条 dispatch_receipt（通过 report API，不要直接写 comment/transition）；receipt 不是终点，你的目标是把【当前阶段】推进到【下一阶段】。';
+  const sharedMemory = '完成当前阶段前，请先把关键进展/决策/结论写入你自己工作区的 memory/YYYY-MM-DD.md（必要时更新相关长期记忆），后续继续用 heartbeat / reports 让平台代写状态推进。';
+  const stageMap = {
+    triage: '当前阶段=triage：请补齐结构化分诊结论与责任链，优先推进到 queued；若责任链仍不完整或范围未定，可继续停在 triage 并用 triage_structured_report 明确缺口，必要时用 decision_request 请求拍板。',
+    queued: '当前阶段=queued：receipt 后要尽快进入实际执行；direct 模式就继续实现并用 execution_completed / blocked_report / decision_request 等把 queued 推进到 done / blocked / pending_decision。subagent/acp 模式先登记真实 worker，再继续推进。',
+    running: '当前阶段=running：继续实现、验证并收口；优先推进到 done（execution_completed / review_submission），若受阻则推进到 blocked / pending_decision / failed，必要时也可 pause，但不能只停在 running。',
+    done: '当前阶段=done：这是 reviewer 接单前态；reviewer receipt 后应推进到 review，并在完成验收后先提交 review_submission，再决定 approve（推进到 complete）或 reject（打回 queued）。',
+    review: '当前阶段=review：reviewer 已正式接单；下一步必须给出验收结论。先提交 review_submission 写清依据，再 approve（complete）或 reject（queued）；若缺上下文可 pause / decision_request，但不能只停在 receipt。',
+    blocked: '当前阶段=blocked：目标是解除阻塞并恢复推进；若阻塞已解除，推动回 queued/继续执行；若仍无法继续，至少用 heartbeat / decision_request 明确阻塞来源、所需外部动作与下一步。',
+    paused: '当前阶段=paused：目标是恢复到挂起前状态并继续推进；若恢复条件已满足就 resume，若仍不满足则通过 heartbeat / decision_request 说明为什么继续保持 paused。',
+    pending_decision: '当前阶段=pending_decision：目标是把待拍板问题讲清楚并等决策收口；请用 decision_request 明确可选方案、风险和建议，决策落定后再恢复推进，不要让 ticket 长期停在无结论状态。',
+  };
+  const fallback = '请先确认当前 stage 的 allowed actions / report contract，并选择一个明确的下一阶段或收口动作推进，不要只完成 receipt。';
+  return [sharedPrefix, stageMap[stage] || fallback, sharedMemory].join(' ');
+}
+
 function buildAgentDispatchMessage({ ticket, agent, assignment }) {
   const apiBaseUrl = assignment ? getAgentApiBaseUrl({ gatewayId: assignment.gateway_id }) : null;
-  const isReviewerStage = ['done', 'review'].includes(String(ticket?.status || '').trim());
-  const stageGuidance = isReviewerStage
-    ? '重要：收到 reviewer assignment 后，先按 hosted contract 回一条 dispatch_receipt（通过 report API，不要直接写 comment/transition）；完成 reviewer 验收后，必须先通过 report API 提交一条 review_submission，把验收依据 / 关键证据 / 通过或打回结论写入时间线；只有在 review_submission 已成功回写后，才允许继续 approve / reject。'
-    : '重要：收到 assignment 后，先按 hosted contract 回一条 dispatch_receipt（通过 report API，不要直接写 comment/transition）；完成当前阶段前，请先把关键进展/决策/结论写入你自己工作区的 memory/YYYY-MM-DD.md（必要时更新相关长期记忆），后续继续用 heartbeat / reports 让平台代写状态推进。';
+  const stageGuidance = buildStageAdvanceGuidance(ticket);
   const base = [
     `🔔 你有 1 个当前阶段待处理工单`,
     '',
@@ -2209,7 +2224,19 @@ app.get('/api/dispatch/ready', (req, res) => {
     return res.json({ ready, _source: 'projection' });
   }
 
-  const allTickets = store.getAllTickets().map(enrichTicketForApi);
+  const rawTickets = store.getAllTickets();
+  const PENDING_DELIVERY_STALE_MS = 60 * 60 * 1000;
+  for (const t of rawTickets) {
+    if (t.status !== 'queued') continue;
+    const agent = String(t.assigned_agent || t.next_actor || '').trim();
+    if (!agent) continue;
+    const latest = dispatch.getLatestDispatchHandshakeState(t.id, agent, 'queued');
+    if (latest?.dispatch_state === 'pending_delivery' && latest?.created_at) {
+      const ageMs = Date.now() - new Date(latest.created_at).getTime();
+      if (ageMs > PENDING_DELIVERY_STALE_MS) dispatch.clearDispatchEvents(t.id);
+    }
+  }
+  const allTickets = rawTickets.map(enrichTicketForApi);
   const ticketById = new Map(allTickets.map((ticket) => [ticket.id, ticket]));
 
   // 构建候选：正常单 (next_actor) + mismatch 单 (alert_target) + 平台催办 nudge
@@ -2732,24 +2759,36 @@ app.get('/api/tickets/:id/dependencies', (req, res) => {
 
 // ── Audit API（平台巡检长期未动工单）──
 
+const AUDIT_STALE_TRIAGE_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_TRIAGE_MINUTES) || 30;
 const AUDIT_STALE_RUNNING_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_RUNNING_MINUTES) || 30;
+const AUDIT_STALE_PAUSED_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_PAUSED_MINUTES) || 240;
+const AUDIT_STALE_DONE_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_DONE_MINUTES) || 30;
 const AUDIT_STALE_REVIEW_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_REVIEW_MINUTES) || 10;
 const AUDIT_STALE_PENDING_DECISION_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_PENDING_DECISION_MINUTES) || 720;
+const AUDIT_STALE_BLOCKED_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_BLOCKED_MINUTES) || 240;
 const AUDIT_REQUEST_RETRY_MINUTES = parsePositiveInt(process.env.AUDIT_REQUEST_RETRY_MINUTES) || 30;
 const QUEUED_NUDGE_STALE_MINUTES = parsePositiveInt(process.env.QUEUED_NUDGE_STALE_MINUTES) || 30;
 const TICKET_NUDGE_THROTTLE_MINUTES = parsePositiveInt(process.env.TICKET_NUDGE_THROTTLE_MINUTES) || 60;
 
 const AUDIT_THRESHOLDS = {
+  triage: AUDIT_STALE_TRIAGE_MINUTES,
   running: AUDIT_STALE_RUNNING_MINUTES,
+  paused: AUDIT_STALE_PAUSED_MINUTES,
+  done: AUDIT_STALE_DONE_MINUTES,
   review: AUDIT_STALE_REVIEW_MINUTES,
   pending_decision: AUDIT_STALE_PENDING_DECISION_MINUTES,
+  blocked: AUDIT_STALE_BLOCKED_MINUTES,
 };
 
 const AUDIT_RESULT_ALLOWED_CONCLUSIONS = new Set([
   'workflow_mismatch',
+  'stale_triage',
   'stale_running',
+  'stale_paused',
+  'stale_done',
   'stale_review',
   'stale_pending_decision',
+  'stale_blocked',
   'no_issue',
 ]);
 const AUDIT_RESULT_ALLOWED_ACTIONS = new Set([
