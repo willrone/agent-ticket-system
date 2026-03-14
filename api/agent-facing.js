@@ -205,6 +205,12 @@ function buildAgentTicketActionApis({ apiBaseUrl = null } = {}) {
     parent_ticket_id: 46,
     execution_mode: 'subagent'
   };
+  const queueExample = {
+    actor: '<triage_owner>'
+  };
+  const startWorkExample = {
+    actor: '<assigned_agent>'
+  };
   const pauseExample = {
     actor: '<current_actor>',
     pause_reason: '等待 reviewer 对 API contract 拍板后再继续。'
@@ -221,6 +227,8 @@ function buildAgentTicketActionApis({ apiBaseUrl = null } = {}) {
     assignment_id: '<current_assignment_id>',
     reject_reason: '验收未通过：请补齐 reviewer write path 的 live smoke 与 contract 说明。'
   };
+  const queueMeta = getWorkflowActionMeta('queue');
+  const startWorkMeta = getWorkflowActionMeta('start_work');
   const pauseMeta = getWorkflowActionMeta('pause');
   const resumeMeta = getWorkflowActionMeta('resume');
   const approveMeta = getWorkflowActionMeta('approve');
@@ -268,6 +276,66 @@ function buildAgentTicketActionApis({ apiBaseUrl = null } = {}) {
           label: '为自己补一张 follow-up 子工单',
           request: createExample,
         },
+      ],
+    },
+    {
+      key: 'queue',
+      method: 'POST',
+      endpoint: '/api/v1/agent/tickets/:id/queue',
+      url: appendApiBaseUrl(apiBaseUrl, '/api/v1/agent/tickets/:id/queue'),
+      summary: '由 triage_owner 对 triage ticket 执行 workflow queue，推进到 queued。',
+      role_key: queueMeta?.role_key || 'triage_owner',
+      allowed_statuses: queueMeta?.from || [],
+      request_fields: [
+        { key: 'actor', type: 'string', required: true, description: '必须等于当前 workflow 解释出的 triage_owner。' },
+      ],
+      constraints: [
+        '只有 available_actions 包含 queue 时才能调用。',
+        'actor 必须等于当前 action.role_key=triage_owner 解析出的身份。',
+        '状态推进由平台执行；agent 只调用受控 action，不得直写状态。',
+      ],
+      response_contract: {
+        status_code: 200,
+        fields: ['success', 'action', 'ticket', 'available_actions'],
+      },
+      error_semantics: [
+        { status_code: 404, code: 'Ticket not found', when: 'ticket 不存在。' },
+        { status_code: 409, code: 'AGENT_ACTION_NOT_ALLOWED', when: '当前 status 不允许 queue；响应会返回 available_actions。' },
+        { status_code: 403, code: 'AGENT_ACTION_FORBIDDEN', when: 'actor 不是当前允许执行 queue 的身份。' },
+      ],
+      examples: [
+        { label: 'triage_owner 放行进入 queued', request: queueExample },
+      ],
+    },
+    {
+      key: 'start_work',
+      method: 'POST',
+      endpoint: '/api/v1/agent/tickets/:id/start-work',
+      url: appendApiBaseUrl(apiBaseUrl, '/api/v1/agent/tickets/:id/start-work'),
+      summary: '由 assigned_agent 对 queued ticket 执行 workflow start_work，推进到 running。',
+      role_key: startWorkMeta?.role_key || 'current_actor',
+      allowed_statuses: startWorkMeta?.from || [],
+      request_fields: [
+        { key: 'actor', type: 'string', required: true, description: '必须等于当前 workflow 解释出的 assigned_agent/current_actor。' },
+      ],
+      constraints: [
+        '只有 available_actions 包含 start_work 时才能调用。',
+        'actor 必须等于当前 action.role_key=current_actor 解析出的身份。',
+        '若 execution_mode 要求 worker，则平台仍会校验 worker evidence 后才允许进入 running。',
+      ],
+      response_contract: {
+        status_code: 200,
+        fields: ['success', 'action', 'ticket', 'available_actions'],
+      },
+      error_semantics: [
+        { status_code: 404, code: 'Ticket not found', when: 'ticket 不存在。' },
+        { status_code: 409, code: 'AGENT_ACTION_NOT_ALLOWED', when: '当前 status 不允许 start_work；响应会返回 available_actions。' },
+        { status_code: 403, code: 'AGENT_ACTION_FORBIDDEN', when: 'actor 不是当前允许执行 start_work 的身份。' },
+        { status_code: 409, code: 'RUNNING_TICKET_CONFLICT', when: '当前 agent 已有其他 running 工单。' },
+        { status_code: 409, code: 'EXECUTION_WORKER_REQUIRED', when: 'execution_mode 需要 worker evidence，但当前未登记 worker。' },
+      ],
+      examples: [
+        { label: 'assigned_agent 开始处理 queued 工单', request: startWorkExample },
       ],
     },
     {
@@ -462,6 +530,90 @@ function buildExecutionModeGuidance() {
   });
 }
 
+function buildStageAdvancePlaybook() {
+  return [
+    {
+      stage: 'triage',
+      goal: '把 triage 阶段推进到 queued，或明确说明为什么暂时不能 queue。',
+      next_stage_options: ['queued', 'triage', 'pending_decision'],
+      recommended_paths: [
+        '责任链完整时提交 triage_structured_report，推动 triage -> queued。',
+        '责任链/范围不完整时保留 triage，并在 report 里写明缺口与补齐条件。',
+        '需要老大/reviewer 拍板时提交 decision_request。',
+      ],
+    },
+    {
+      stage: 'queued',
+      goal: '把 queued 推进到 running 后继续收口，不能只停在 receipt。',
+      next_stage_options: ['running', 'done', 'blocked', 'pending_decision', 'failed', 'paused'],
+      recommended_paths: [
+        'direct 模式：receipt 后尽快实现并用 execution_completed / blocked_report / decision_request / execution_failed 收口。',
+        'subagent/acp 模式：先登记真实 worker，再推进 running 与后续收口。',
+        '若暂时无法继续，也要明确 blocked / pending_decision / paused 的原因与恢复条件。',
+      ],
+    },
+    {
+      stage: 'running',
+      goal: '把 running 收口到 done 或其他明确下一阶段。',
+      next_stage_options: ['done', 'blocked', 'pending_decision', 'failed', 'paused'],
+      recommended_paths: [
+        '实现与验证完成后提交 execution_completed / review_submission，推动 running -> done。',
+        '受外部阻塞时用 blocked_report。',
+        '需要拍板时用 decision_request；不可恢复失败时用 execution_failed。',
+      ],
+    },
+    {
+      stage: 'done',
+      goal: 'reviewer 接单后把 done 推进到 review，并继续形成验收结论。',
+      next_stage_options: ['review', 'complete', 'queued', 'paused', 'pending_decision'],
+      recommended_paths: [
+        '先 dispatch_receipt，让 done -> review。',
+        'reviewer 完成验收后先提 review_submission，再 approve / reject。',
+        '若缺上下文，可 pause 或 decision_request，但不能只停在 receipt。',
+      ],
+    },
+    {
+      stage: 'review',
+      goal: '给出 reviewer 正式验收结论。',
+      next_stage_options: ['complete', 'queued', 'paused', 'pending_decision'],
+      recommended_paths: [
+        '先 review_submission，再 approve 推进到 complete。',
+        '不通过则先 review_submission，再 reject 打回 queued。',
+        '信息不足时 pause / decision_request，并明确待补项。',
+      ],
+    },
+    {
+      stage: 'blocked',
+      goal: '解除阻塞并恢复推进，或明确升级路径。',
+      next_stage_options: ['queued', 'running', 'pending_decision', 'blocked'],
+      recommended_paths: [
+        '阻塞解除后恢复到 queued/running 并继续推进。',
+        '仍需外部拍板时提交 decision_request。',
+        '持续 blocked 也要持续 heartbeat，写清 blocker、owner、恢复条件。',
+      ],
+    },
+    {
+      stage: 'paused',
+      goal: '恢复到挂起前状态并继续推进，或明确保持挂起的条件。',
+      next_stage_options: ['queued', 'running', 'review', 'paused', 'pending_decision'],
+      recommended_paths: [
+        '条件满足时 resume 回到 paused_from_status。',
+        '条件未满足时 heartbeat 说明保持 paused 的原因与恢复信号。',
+        '若需要额外拍板，用 decision_request。',
+      ],
+    },
+    {
+      stage: 'pending_decision',
+      goal: '把待拍板问题讲清楚并等待明确结论。',
+      next_stage_options: ['queued', 'running', 'review', 'complete', 'pending_decision'],
+      recommended_paths: [
+        '用 decision_request 写清可选方案、风险、建议。',
+        '决策落定后回到对应执行/验收阶段继续推进。',
+      ],
+    },
+  ];
+}
+
 function buildWritebackTemplates() {
   return {
     heartbeat: {
@@ -479,7 +631,7 @@ function buildWritebackTemplates() {
     },
     dispatch_receipt: {
       report_type: 'dispatch_receipt',
-      when: 'assignment 已送达目标 ticket session 后，agent 首次正式接单时立即回执；平台只在 decision=accepted 时推进 queued->running / done->review。',
+      when: 'assignment 已送达目标 ticket session 后，agent 首次正式接单时立即回执；receipt 不是终点，后续必须继续把当前阶段推进到下一阶段；平台只在 decision=accepted 时推进 queued->running / done->review。',
       example: {
         assignment_token: '<assignment_token>',
         report_type: 'dispatch_receipt',
@@ -490,7 +642,7 @@ function buildWritebackTemplates() {
           stage: 'queued',
           agent: 'beavy',
           decision: 'accepted',
-          message: '已收到 assignment，开始按 contract 执行。',
+          message: '已收到 assignment，开始按 contract 执行，并继续把 queued 阶段推进到下一阶段。',
         },
         progress: {
           status: 'in_progress',
@@ -661,6 +813,7 @@ function buildAgentDiscoverability({ apiBaseUrl = null } = {}) {
 function buildHostedSkillMarkdown() {
   const executionGuidance = buildExecutionModeGuidance();
   const writebackTemplates = buildWritebackTemplates();
+  const stageAdvancePlaybook = buildStageAdvancePlaybook();
   const sections = [
     '# Ticket Handler（平台托管 bundle）',
     '',
@@ -673,7 +826,7 @@ function buildHostedSkillMarkdown() {
     '3. 拉取当前 skill/playbook bundle：获取 markdown + machine-readable manifest。',
     '4. 如需更多上下文，再读 dependencies / comments。',
     '5. 执行过程中只提交 heartbeat / reports；由平台解释为 comment / transition / notify。',
-    '5.1 assignment 送达后先提交 dispatch_receipt；平台只在 receipt.decision=accepted 时推进 queued->running / done->review；若 stage=review，则仅确认 reviewer 已正式接单并停止重派。',
+    '5.1 assignment 送达后先提交 dispatch_receipt；receipt 不是终点，当前阶段必须继续推进到下一阶段；平台只在 receipt.decision=accepted 时推进 queued->running / done->review；若 stage=review，则仅确认 reviewer 已正式接单并停止重派。',
     '6. 若当前需要正式提单、挂起/恢复，或 reviewer 需要 approve/reject，优先使用 agent-facing ticket action API，而不是猜测 comment/transition 直写。',
     '6.1 reviewer 阶段必须遵循 dispatch_receipt -> review_submission -> approve/reject 顺序；不能 receipt 后直接关单或打回。',
     '',
@@ -763,9 +916,27 @@ function buildHostedSkillMarkdown() {
 
   sections.push(
     '',
+    '## 当前阶段推进剧本（receipt 不是终点）',
+    '- 所有 stage 通用要求：先 dispatch_receipt，再把当前阶段推进到一个明确的下一阶段或收口状态。',
+    '- 若暂时不能推进，也必须用 heartbeat / progress_update / blocked_report / decision_request 说明原因、证据、恢复条件与建议下一步。',
+  );
+
+  stageAdvancePlaybook.forEach((item) => {
+    sections.push(
+      '',
+      `### stage=${item.stage}`,
+      `- 当前阶段目标：${item.goal}`,
+      `- 下一阶段可选项：${item.next_stage_options.join(' / ')}`,
+      '- 推荐收口路径：',
+      ...item.recommended_paths.map((path) => `  - ${path}`),
+    );
+  });
+
+  sections.push(
+    '',
     '## 建议执行方式',
     '- queued / running 阶段都先回源上下文，再决定 direct / subagent / acp 的具体执行姿势。',
-    '- assignment 送达后先回 dispatch_receipt；只有 receipt=accepted 才会推进 queued->running / done->review；review 阶段则只确认正式接单并停止重派。',
+    '- assignment 送达后先回 dispatch_receipt；receipt 不是终点，后续必须继续把当前阶段推进到下一阶段；只有 receipt=accepted 才会推进 queued->running / done->review；review 阶段则只确认正式接单并停止重派。',
     '- 进入执行后尽快发 heartbeat；关键里程碑用 progress_update。',
     '- 执行完成后优先提交 execution_completed 或 review_submission。',
     '- 若当前是 reviewer assignment，则必须先提交 review_submission，再调用 approve/reject。',
@@ -1293,7 +1464,7 @@ export function buildAgentWorkflowSchema() {
       token_transport: ['x-assignment-token', 'assignment_token(body/query)'],
       report_types: AGENT_REPORT_TYPES,
       playbook_fetch_supported: true,
-      ticket_actions_supported: ['create', 'pause', 'resume', 'approve', 'reject'],
+      ticket_actions_supported: ['create', 'queue', 'start_work', 'pause', 'resume', 'approve', 'reject'],
     },
   };
 }
@@ -1346,6 +1517,8 @@ export function buildRuntimeContext({ assignment = null } = {}) {
       direct_ticket_write_for_agents: false,
       stock_workboard_api: true,
       ticket_action_create_api: true,
+      ticket_action_queue_api: true,
+      ticket_action_start_work_api: true,
       ticket_action_pause_api: true,
       ticket_action_resume_api: true,
       ticket_action_approve_api: true,

@@ -508,15 +508,28 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
     return { ok: false, status: 400, body: { error: 'Bad request', message: '工单标题不能为空' } };
   }
 
-  if (!agentFacing && status !== undefined && !ALLOWED_TICKET_STATUSES.includes(status)) {
-    return {
-      ok: false,
-      status: 400,
-      body: {
-        error: 'Bad request',
-        message: `status 非法，允许值：${ALLOWED_TICKET_STATUSES.join('/')}`,
-      },
-    };
+  if (!agentFacing && status !== undefined) {
+    if (!ALLOWED_TICKET_STATUSES.includes(status)) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          error: 'Bad request',
+          message: `status 非法，允许值：${ALLOWED_TICKET_STATUSES.join('/')}`,
+        },
+      };
+    }
+    if (status !== 'triage') {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          error: 'Bad request',
+          message: '创建工单只能使用 triage 状态；其他状态必须通过 transition 推进',
+          allowed_create_status: 'triage',
+        },
+      };
+    }
   }
 
   if (request_type !== undefined && request_type !== null && request_type !== '' && !ALLOWED_REQUEST_TYPES.includes(request_type)) {
@@ -601,7 +614,7 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
     payload: {
       title: title.trim(),
       description: normalizeOptionalText(description, 20000) ?? '',
-      status: agentFacing ? 'triage' : (status ?? 'triage'),
+      status: 'triage',
       triage_owner: normalizedTriageOwner,
       review_owner: normalizedReviewOwner,
       decision_owner: normalizedDecisionOwner,
@@ -3556,6 +3569,12 @@ agentRouter.post('/tickets', (req, res) => {
     available_actions: getAvailableActions(ticket.id),
   });
 });
+
+// POST /tickets/:id/queue - agent-facing 执行 queue
+agentRouter.post('/tickets/:id/queue', (req, res) => runAgentTicketAction(req, res, 'queue'));
+
+// POST /tickets/:id/start-work - agent-facing 执行 start_work
+agentRouter.post('/tickets/:id/start-work', (req, res) => runAgentTicketAction(req, res, 'start_work'));
 
 // POST /tickets/:id/pause - agent-facing 执行 pause
 agentRouter.post('/tickets/:id/pause', (req, res) => runAgentTicketAction(req, res, 'pause'));

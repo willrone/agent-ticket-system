@@ -6,10 +6,10 @@ import './test-setup.js';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import app from './app.js';
-import { _resetDbForTesting } from './store-sqlite.js';
+import { _resetDbForTesting, findLatestAssignmentForTicket, createOrReuseAssignment } from './store-sqlite.js';
 import {
   _resetDbForTesting as _resetDispatchForTesting,
   ackDispatchEvent as ackDispatchEventRecord,
@@ -30,19 +30,23 @@ function ensureCleanStore() {
   }
 }
 
+afterEach(() => {
+  ensureCleanStore();
+});
+
 describe('POST /api/tickets', () => {
   beforeEach(() => {
     ensureCleanStore();
   });
 
-  it('创建工单立即返回 201，status 为 queued', async () => {
+  it('创建工单立即返回 201，未传 status 时默认为 triage', async () => {
     const res = await request(app)
       .post('/api/tickets')
       .send({ title: 'Test ticket', description: 'Test desc' })
       .expect(201);
 
     expect(res.body).toBeDefined();
-    expect(res.body.status).toBe('queued');
+    expect(res.body.status).toBe('triage');
     expect(res.body.assigned_agent).toBe('donky');
     expect(res.body.title).toBe('Test ticket');
     expect(res.body.description).toBe('Test desc');
@@ -55,11 +59,11 @@ describe('POST /api/tickets', () => {
       .expect(201);
 
     expect(res.body.assigned_agent).toBe('custom-agent');
-    expect(res.body.status).toBe('queued');
+    expect(res.body.status).toBe('triage');
   });
 
-  it('创建工单若 review_owner 为人类主体，则 done 阶段进入 dispatch ready 并回主会话 receipt 闭环', async () => {
-    const createRes = await request(app)
+  it('创建工单禁止直接指定非 triage 状态', async () => {
+    const res = await request(app)
       .post('/api/tickets')
       .send({
         title: 'Explicit review owner',
@@ -69,21 +73,10 @@ describe('POST /api/tickets', () => {
         review_owner: 'ronghui',
         status: 'done',
       })
-      .expect(201);
+      .expect(400);
 
-    expect(createRes.body.review_owner).toBe('ronghui');
-    expect(createRes.body.current_actor).toBe('ronghui');
-    expect(createRes.body.next_actor).toBe('ronghui');
-    expect(createRes.body.next_actor_source).toBe('review_owner');
-
-    const dispatchRes = await request(app)
-      .get('/api/dispatch/ready')
-      .expect(200);
-    const readyItem = dispatchRes.body.ready.find((item) => item.ticket_id === createRes.body.id);
-    expect(readyItem).toBeDefined();
-    expect(readyItem.agent).toBe('ronghui');
-    expect(readyItem.target_session_key).toBe(NOTIFY_MAIN_SESSION);
-    expect(readyItem.reason).toBe('done');
+    expect(res.body.message).toContain('创建工单只能使用 triage 状态');
+    expect(res.body.allowed_create_status).toBe('triage');
   });
 
   it('创建工单支持进入 triage 并显式返回下一步责任人', async () => {
@@ -124,7 +117,7 @@ describe('GET /api/metrics/dashboard', () => {
 
     const runningRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Running ticket', assigned_agent: 'beavy', triage_owner: 'leoss' })
+      .send({ title: 'Running ticket', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
 
     await request(app)
@@ -134,7 +127,7 @@ describe('GET /api/metrics/dashboard', () => {
 
     const doneRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Done ticket', assigned_agent: 'donky', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Done ticket', status: 'queued', assigned_agent: 'donky', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
 
     await request(app)
@@ -287,7 +280,7 @@ describe('GET /api/tickets/pull', () => {
   it('拉取指定 agent 的 queued 工单', async () => {
     await request(app)
       .post('/api/tickets')
-      .send({ title: 'Pull test', description: 'Desc', agent: 'donky' })
+      .send({ title: 'Pull test', description: 'Desc', status: 'queued', agent: 'donky', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
 
     const res = await request(app)
@@ -353,6 +346,7 @@ describe('GET /api/notifications/summary', () => {
       .send({
         title: 'Completed ticket',
         description: 'Desc',
+        status: 'queued',
         triage_owner: 'leoss',
         review_owner: 'leoss',
         assigned_agent: 'beavy',
@@ -383,6 +377,7 @@ describe('GET /api/notifications/summary', () => {
       .send({
         title: 'Failed ticket',
         description: 'Desc',
+        status: 'queued',
         triage_owner: 'leoss',
         review_owner: 'leoss',
         assigned_agent: 'beavy',
@@ -406,6 +401,7 @@ describe('GET /api/notifications/summary', () => {
       .send({
         title: 'Decision ticket',
         description: 'Desc',
+        status: 'queued',
         triage_owner: 'leoss',
         review_owner: 'leoss',
         decision_owner: '荣晖',
@@ -497,7 +493,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('通过 transition API 将工单更新为 running，并写入锁定信息', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Patch test', description: 'Desc' })
+      .send({ title: 'Patch test', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -518,7 +514,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('transition API 在 actor 缺失或占位时会按动作角色自动注入身份', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Auto actor', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Auto actor', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -553,7 +549,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('通过 transition API 将 running 工单更新为 done 并设置 result_summary', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Complete test', description: 'Desc' })
+      .send({ title: 'Complete test', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -617,10 +613,37 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
     expect(readyItem.agent).toBe('beavy');
   });
 
+  it('triage -> queue 缺 assigned_agent 或 review_owner 时返回 409 TRIAGE_QUEUE_CHAIN_INCOMPLETE', async () => {
+    const { updateTicket } = await import('./store.js');
+    const full = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Full chain', description: 'Desc', status: 'triage', triage_owner: 'leoss', assigned_agent: 'beavy', review_owner: 'leoss' })
+      .expect(201);
+    updateTicket(full.body.id, { assigned_agent: null });
+    const res1 = await request(app)
+      .post(`/api/tickets/${full.body.id}/transition`)
+      .send({ action: 'queue', actor: 'leoss' })
+      .expect(409);
+    expect(res1.body.error).toBe('TRIAGE_QUEUE_CHAIN_INCOMPLETE');
+    expect(res1.body.missing_fields).toContain('assigned_agent');
+
+    const full2 = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Full chain 2', description: 'Desc', status: 'triage', triage_owner: 'leoss', assigned_agent: 'beavy', review_owner: 'leoss' })
+      .expect(201);
+    updateTicket(full2.body.id, { review_owner: null });
+    const res2 = await request(app)
+      .post(`/api/tickets/${full2.body.id}/transition`)
+      .send({ action: 'queue', actor: 'leoss' })
+      .expect(409);
+    expect(res2.body.error).toBe('TRIAGE_QUEUE_CHAIN_INCOMPLETE');
+    expect(res2.body.missing_fields).toContain('review_owner');
+  });
+
   it('支持 pause / resume：恢复到挂起前状态并保留挂起元信息', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Pause test', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Pause test', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -653,7 +676,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('支持 reset_to_queued：triage_owner 可将 running 工单撤回 queued，并自动写审计评论', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Reset start', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Reset start', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -691,7 +714,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('支持 reset_to_queued：paused 工单撤回 queued 时会清空挂起元信息', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Reset paused start', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Reset paused start', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -719,7 +742,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('reset_to_queued 缺少 reason 时返回必填字段错误', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Reset reason required', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Reset reason required', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -743,7 +766,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('reset_to_queued 仅允许 triage_owner 执行', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Reset actor guard', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Reset actor guard', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -766,7 +789,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('支持 formal_reassign：running 工单正式改派后回到 queued，并向目标 agent 重新派单', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Formal reassign flow', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Formal reassign flow', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -800,7 +823,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('支持 handoff：paused 工单交接后回到 queued，清空挂起信息并切到目标 agent', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Handoff flow', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Handoff flow', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -838,7 +861,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('paused 工单不会进入 dispatch ready 或 notifications ready', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Paused ready gate', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Paused ready gate', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
     const ticketId = createRes.body.id;
 
@@ -857,12 +880,12 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
   it('同一 assigned_agent 已有 running 工单时，第二张工单 start_work 返回 409 和占用详情', async () => {
     const first = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Running #1', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Running #1', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
 
     const second = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Running #2', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Running #2', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
 
     await request(app)
@@ -892,10 +915,141 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
     expect(secondDetail.body.locked_by).toBeNull();
   });
 
+  it('dispatch ready 会先抢 execution reservation，第二张同 agent queued 单不会再进入 ready', async () => {
+    const first = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Reservation front-run #1', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss', execution_mode: 'direct' })
+      .expect(201);
+
+    const second = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Reservation front-run #2', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss', execution_mode: 'direct' })
+      .expect(201);
+
+    const ready = await request(app).get('/api/dispatch/ready').expect(200);
+    expect(ready.body.ready).toHaveLength(1);
+    expect([first.body.id, second.body.id]).toContain(ready.body.ready[0].ticket_id);
+    expect(ready.body.ready[0].reservation).toEqual(expect.objectContaining({
+      ticket_id: ready.body.ready[0].ticket_id,
+      agent_id: 'beavy',
+      state: 'reserved',
+    }));
+
+    const blockedTicketId = ready.body.ready[0].ticket_id === first.body.id ? second.body.id : first.body.id;
+    const blockedDetail = await request(app).get(`/api/tickets/${blockedTicketId}`).expect(200);
+    expect(blockedDetail.body.execution_guard).toEqual(expect.objectContaining({
+      suppress_dispatch: true,
+      reason: 'reservation_conflict',
+    }));
+    expect(blockedDetail.body.execution_guard.reservation_conflict).toEqual(expect.objectContaining({
+      agent_id: 'beavy',
+      state: 'reserved',
+    }));
+  });
+
+  it('dispatch detection 会前置识别 queued receipt accepted reservation，与 write-time running gate 保持一致', async () => {
+    const first = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Receipt reserved #1', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss', execution_mode: 'subagent', max_active_workers: 1 })
+      .expect(201);
+
+    const second = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Receipt reserved #2', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss', execution_mode: 'subagent', max_active_workers: 1 })
+      .expect(201);
+
+    const ready1 = await request(app).get('/api/dispatch/ready').expect(200);
+    const firstReady = ready1.body.ready.find((item) => item.ticket_id === first.body.id);
+    const secondReady = ready1.body.ready.find((item) => item.ticket_id === second.body.id);
+    expect(firstReady || secondReady).toBeDefined();
+
+    const reserved = firstReady || secondReady;
+    const blockedTicketId = reserved.ticket_id === first.body.id ? second.body.id : first.body.id;
+
+    await request(app)
+      .post(`/api/dispatch/${reserved.dispatch_id}/ack`)
+      .expect(200);
+
+    await request(app)
+      .post(`/api/agent/assignments/${reserved.assignment_id}/reports`)
+      .send({
+        assignment_token: reserved.assignment.assignment_token,
+        report_type: 'dispatch_receipt',
+        idempotency_key: `reservation-${reserved.ticket_id}`,
+        receipt: {
+          dispatch_id: reserved.dispatch_id,
+          ticket_id: reserved.ticket_id,
+          stage: 'queued',
+          agent: 'beavy',
+          decision: 'accepted',
+          message: '已 receipt，保留 running 资格。',
+        },
+      })
+      .expect(201);
+
+    const ready2 = await request(app).get('/api/dispatch/ready').expect(200);
+    expect(ready2.body.ready.find((item) => item.ticket_id === blockedTicketId)).toBeUndefined();
+
+    const forcedStart = await request(app)
+      .post(`/api/tickets/${blockedTicketId}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(409);
+    expect(['EXECUTION_WORKER_REQUIRED', 'RUNNING_TICKET_CONFLICT']).toContain(forcedStart.body.error);
+  });
+
+  it('released reservation 不应继续占住 lane，后续 queued 单应可重新进入 dispatch ready', async () => {
+    const first = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Released reservation holder', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss', execution_mode: 'direct' })
+      .expect(201);
+
+    const ready1 = await request(app).get('/api/dispatch/ready').expect(200);
+    const firstReady = ready1.body.ready.find((item) => item.ticket_id === first.body.id);
+    expect(firstReady).toBeDefined();
+
+    await request(app)
+      .post(`/api/tickets/${first.body.id}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+
+    await request(app)
+      .post(`/api/tickets/${first.body.id}/transition`)
+      .send({ action: 'submit_for_review', actor: 'beavy', result_summary: 'done' })
+      .expect(200);
+
+    await request(app)
+      .post(`/api/tickets/${first.body.id}/transition`)
+      .send({ action: 'approve', actor: 'leoss' })
+      .expect(200);
+
+    const firstAfter = await request(app).get(`/api/tickets/${first.body.id}`).expect(200);
+    expect(firstAfter.body.execution_guard.reservation).toEqual(expect.objectContaining({
+      state: 'released',
+      release_reason: 'approve',
+    }));
+
+    const second = await request(app)
+      .post('/api/tickets')
+      .send({ title: 'Should reacquire after release', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss', execution_mode: 'direct' })
+      .expect(201);
+
+    const secondDetail = await request(app).get(`/api/tickets/${second.body.id}`).expect(200);
+    expect(secondDetail.body.execution_guard.reservation_conflict).toBeNull();
+
+    const ready2 = await request(app).get('/api/dispatch/ready').expect(200);
+    const secondReady = ready2.body.ready.find((item) => item.ticket_id === second.body.id);
+    expect(secondReady).toBeDefined();
+    expect(secondReady.reservation).toEqual(expect.objectContaining({
+      ticket_id: second.body.id,
+      agent_id: 'beavy',
+      state: 'reserved',
+    }));
+  });
+
   it('paused->resume 到 running 也受同 agent running 门禁约束', async () => {
     const pausedTicket = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Paused from running', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Paused from running', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
 
     await request(app)
@@ -910,7 +1064,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
 
     const runningTicket = await request(app)
       .post('/api/tickets')
-      .send({ title: 'Occupied running', description: 'Desc', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
+      .send({ title: 'Occupied running', description: 'Desc', status: 'queued', assigned_agent: 'beavy', triage_owner: 'leoss', review_owner: 'leoss' })
       .expect(201);
 
     await request(app)
@@ -1291,6 +1445,7 @@ describe('GET /api/dispatch/ready', () => {
       .send({
         title: 'Decision only notify',
         description: 'Desc',
+        status: 'queued',
         triage_owner: 'leoss',
         review_owner: 'leoss',
         decision_owner: '荣晖',
@@ -1335,6 +1490,7 @@ describe('GET /api/dispatch/ready', () => {
       .send({
         title: 'Already running',
         description: 'Desc',
+        status: 'queued',
         triage_owner: 'leoss',
         review_owner: 'leoss',
         assigned_agent: 'beavy',
@@ -1351,6 +1507,7 @@ describe('GET /api/dispatch/ready', () => {
       .send({
         title: 'Should stay queued',
         description: 'Desc',
+        status: 'queued',
         triage_owner: 'leoss',
         review_owner: 'leoss',
         assigned_agent: 'beavy',
@@ -1368,6 +1525,7 @@ describe('GET /api/dispatch/ready', () => {
       .send({
         title: 'Review notify target',
         description: 'Desc',
+        status: 'queued',
         triage_owner: 'leoss',
         review_owner: 'beavy',
         assigned_agent: 'donky',
@@ -1421,6 +1579,7 @@ describe('GET /api/dispatch/ready', () => {
       .send({
         title: 'Smoke evidence',
         description: 'supplemental smoke ticket',
+        status: 'queued',
         triage_owner: 'leoss',
         review_owner: 'leoss',
         assigned_agent: 'beavy',
@@ -1499,8 +1658,10 @@ describe('execution contract / workers / dispatch suppress', () => {
       .send({
         title: '实现执行模式平台化',
         description: '需要做后端代码开发',
+        status: 'queued',
         implementation_scope: '后端代码开发与测试回归',
         triage_owner: 'leoss',
+        review_owner: 'leoss',
         assigned_agent: 'beavy',
       })
       .expect(201);
@@ -1542,8 +1703,10 @@ describe('execution contract / workers / dispatch suppress', () => {
       .send({
         title: '实现执行模式平台化',
         description: '需要做后端代码开发',
+        status: 'queued',
         implementation_scope: '后端代码开发与测试回归',
         triage_owner: 'leoss',
+        review_owner: 'leoss',
         assigned_agent: 'beavy',
       })
       .expect(201);
@@ -1834,7 +1997,9 @@ describe('workflow_mismatch 字段输出', () => {
       .send({
         title: 'List mismatch',
         description: 'Desc',
+        status: 'queued',
         triage_owner: 'leoss',
+        review_owner: 'leoss',
         assigned_agent: 'donky',
       })
       .expect(201);
@@ -1865,7 +2030,9 @@ describe('workflow_mismatch 字段输出', () => {
       .send({
         title: 'Detail mismatch',
         description: 'Desc',
+        status: 'queued',
         triage_owner: 'leoss',
+        review_owner: 'leoss',
         assigned_agent: 'donky',
       })
       .expect(201);
@@ -1922,6 +2089,29 @@ describe('GET /api/audits/ready', () => {
     expect(item.message).toContain('不要自动修改工单状态');
   });
 
+  it('triage 超过 30 分钟阈值的工单生成 stale_triage 审计事件', async () => {
+    const staleTime = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Stale triage ticket',
+        description: 'Desc',
+        status: 'triage',
+        triage_owner: 'leoss',
+        assigned_agent: 'donky',
+        review_owner: 'leoss',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+    const { updateTicket } = await import('./store.js');
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const res = await request(app).get('/api/audits/ready').expect(200);
+    const item = res.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(item).toBeDefined();
+    expect(item.audit_type).toBe('stale_triage');
+  });
+
   it('review 超过阈值的工单生成 stale_review 审计事件', async () => {
     const staleTime = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
     const createRes = await request(app)
@@ -1965,6 +2155,29 @@ describe('GET /api/audits/ready', () => {
     expect(item).toBeUndefined();
   });
 
+  it('done 超过 30 分钟阈值的工单生成 stale_done 审计事件', async () => {
+    const staleTime = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Stale done ticket',
+        description: 'Desc',
+        status: 'done',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+    const { updateTicket } = await import('./store.js');
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const res = await request(app).get('/api/audits/ready').expect(200);
+    const item = res.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(item).toBeDefined();
+    expect(item.audit_type).toBe('stale_done');
+  });
+
   it('pending_decision 超过 12h 阈值的工单生成 stale_pending_decision 审计事件', async () => {
     const staleTime = new Date(Date.now() - 13 * 60 * 60 * 1000).toISOString();
     const createRes = await request(app)
@@ -1972,7 +2185,9 @@ describe('GET /api/audits/ready', () => {
       .send({
         title: 'Stale pending_decision ticket',
         description: 'Desc',
+        status: 'queued',
         triage_owner: 'leoss',
+        review_owner: 'leoss',
         decision_owner: '荣晖',
         assigned_agent: 'beavy',
       })
@@ -1995,6 +2210,72 @@ describe('GET /api/audits/ready', () => {
     const item = res.body.ready.find((r) => r.ticket_id === ticketId);
     expect(item).toBeDefined();
     expect(item.audit_type).toBe('stale_pending_decision');
+  });
+
+  it('paused 超过 4 小时阈值的工单生成 stale_paused 审计事件', async () => {
+    const staleTime = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Stale paused ticket',
+        description: 'Desc',
+        status: 'queued',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'pause', actor: 'beavy', pause_reason: '等待外部依赖' })
+      .expect(200);
+
+    const { updateTicket } = await import('./store.js');
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const res = await request(app).get('/api/audits/ready').expect(200);
+    const item = res.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(item).toBeDefined();
+    expect(item.audit_type).toBe('stale_paused');
+  });
+
+  it('blocked 超过 4 小时阈值的工单生成 stale_blocked 审计事件', async () => {
+    const staleTime = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Stale blocked ticket',
+        description: 'Desc',
+        status: 'queued',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        assigned_agent: 'beavy',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'block', actor: 'beavy', blocker_summary: '等待外部系统恢复' })
+      .expect(200);
+
+    const { updateTicket } = await import('./store.js');
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const res = await request(app).get('/api/audits/ready').expect(200);
+    const item = res.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(item).toBeDefined();
+    expect(item.audit_type).toBe('stale_blocked');
   });
 
   it('running 未超过 30 分钟阈值的工单不出现在 audits/ready 中', async () => {
@@ -2218,6 +2499,7 @@ describe('audit result contract + nudge loop', () => {
       .send({
         title: 'Queued stale loop',
         description: 'Desc',
+        status: 'queued',
         assigned_agent: 'beavy',
         triage_owner: 'leoss',
         review_owner: 'leoss',
@@ -2316,6 +2598,7 @@ describe('agent-facing task API MVP', () => {
       .send({
         title: 'Agent-facing MVP',
         description: '落 assignment/read-report API',
+        status: 'queued',
         assigned_agent: 'beavy',
         triage_owner: 'leoss',
         review_owner: 'leoss',
@@ -2353,7 +2636,7 @@ describe('agent-facing task API MVP', () => {
       ]),
       manifest: expect.objectContaining({
         manifest_version: 'v1',
-        allowed_report_types: expect.arrayContaining(['progress_update', 'dispatch_receipt', 'execution_completed', 'decision_request']),
+        allowed_report_types: expect.arrayContaining(['progress_update', 'dispatch_receipt', 'execution_completed', 'decision_request', 'triage_structured_report']),
         constraints: expect.objectContaining({
           single_writer: true,
           direct_ticket_write_allowed: false,
@@ -2365,7 +2648,10 @@ describe('agent-facing task API MVP', () => {
         ]),
         writeback_templates: expect.objectContaining({
           heartbeat: expect.objectContaining({ channel: 'heartbeat' }),
-          dispatch_receipt: expect.objectContaining({ report_type: 'dispatch_receipt' }),
+          dispatch_receipt: expect.objectContaining({
+            report_type: 'dispatch_receipt',
+            when: expect.stringContaining('receipt 不是终点'),
+          }),
           progress_update: expect.objectContaining({ report_type: 'progress_update' }),
           execution_completed: expect.objectContaining({ report_type: 'execution_completed' }),
         }),
@@ -2381,6 +2667,33 @@ describe('agent-facing task API MVP', () => {
 
     expect(playbookRes.body.data.ref.playbook_url).toBe('/api/v1/agent/playbooks/ticket-handler');
     expect(playbookRes.body.data.checksum_sha256).toBe(skillRes.body.data.checksum_sha256);
+    expect(playbookRes.body.data.markdown).toContain('## 当前阶段推进剧本（receipt 不是终点）');
+    expect(playbookRes.body.data.markdown).toContain('### stage=review');
+    expect(playbookRes.body.data.markdown).toContain('下一阶段可选项：complete / queued / paused / pending_decision');
+  });
+
+  it('dispatch ready assignment message 会明确 receipt 不是终点，并写出当前阶段下一步', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Queued dispatch guidance',
+        description: 'Desc',
+        assigned_agent: 'beavy',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        status: 'queued',
+      })
+      .expect(201);
+
+    const dispatchRes = await request(app)
+      .get('/api/dispatch/ready')
+      .expect(200);
+    const readyItem = dispatchRes.body.ready.find((item) => item.ticket_id === createRes.body.id);
+    expect(readyItem).toBeDefined();
+    expect(readyItem.message).toContain('receipt 不是终点');
+    expect(readyItem.message).toContain('当前阶段=queued');
+    expect(readyItem.message).toContain('推进到【下一阶段】');
+    expect(readyItem.message).toContain('subagent/acp 模式先登记真实 worker');
   });
 
   it('subagent assignment/runtime/skill 会明确要求先派生 worker，且无 worker 迹象时 report 不会把 queued 直接桥接到 running', async () => {
@@ -2395,6 +2708,9 @@ describe('agent-facing task API MVP', () => {
     const skillRes = await request(app)
       .get('/api/v1/agent/skills/current')
       .expect(200);
+    expect(skillRes.body.data.markdown).toContain('receipt 不是终点');
+    expect(skillRes.body.data.markdown).toContain('### stage=queued');
+    expect(skillRes.body.data.markdown).toContain('下一阶段可选项：running / done / blocked / pending_decision / failed / paused');
     expect(skillRes.body.data.markdown).toContain('进入 running 前必须先派生并登记 worker');
     expect(skillRes.body.data.manifest.execution_mode_guidance).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -2545,7 +2861,7 @@ describe('agent-facing task API MVP', () => {
     ]));
     expect(detailRes.body.contract).toEqual(expect.objectContaining({
       single_writer: true,
-      allowed_report_types: expect.arrayContaining(['progress_update', 'dispatch_receipt', 'execution_completed']),
+      allowed_report_types: expect.arrayContaining(['progress_update', 'dispatch_receipt', 'execution_completed', 'triage_structured_report']),
       auth: expect.objectContaining({
         preferred_transport: expect.objectContaining({ name: 'X-Assignment-Token' }),
       }),
@@ -2681,6 +2997,7 @@ describe('agent-facing task API MVP', () => {
       .send({
         title: 'Remote live acceptance partial',
         description: 'remote gateway no api base url yet',
+        status: 'queued',
         assigned_agent: 'cowder',
         triage_owner: 'leoss',
         review_owner: 'leoss',
@@ -2772,6 +3089,7 @@ describe('agent-facing task API MVP', () => {
       .send({
         title: 'Supplemental smoke',
         description: 'smoke evidence',
+        status: 'queued',
         assigned_agent: 'beavy',
         triage_owner: 'leoss',
         review_owner: 'leoss',
@@ -3007,6 +3325,7 @@ describe('agent-facing task API MVP', () => {
       .expect(201);
 
     expect(report.body.assignment_status).toBe('in_progress');
+    expect(report.body.validation_audit_id).toBeTruthy();
     expect(report.body.interpreter_result.transition_preview).toEqual(expect.objectContaining({
       action: 'start_work',
       suggested_status: 'running',
@@ -3023,6 +3342,219 @@ describe('agent-facing task API MVP', () => {
         content: expect.stringContaining('【agent_report】dispatch_receipt'),
       }),
     ]));
+  });
+
+  it('assignment write validation: stale assignment heartbeat 返回 409 ASSIGNMENT_STALE 与 machine_readable', async () => {
+    const { ticket, ready } = await createReadyAssignment({ title: 'Stale heartbeat test' });
+    const token = ready.assignment.assignment_token;
+
+    await request(app).post(`/api/dispatch/${ready.dispatch_id}/ack`).expect(200);
+
+    await request(app)
+      .post(`/api/tickets/${ticket.id}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+
+    const res = await request(app)
+      .post(`/api/agent/assignments/${ready.assignment_id}/heartbeat`)
+      .set('x-assignment-token', token)
+      .send({ idempotency_key: 'stale-hb', progress: { status: 'in_progress', percent: 10 } })
+      .expect(409);
+
+    expect(res.body.code).toBe('ASSIGNMENT_STALE');
+    expect(res.body.validation_audit_id).toBeTruthy();
+    expect(res.body.machine_readable).toEqual(expect.objectContaining({
+      code: 'ASSIGNMENT_STALE',
+      codes: expect.arrayContaining(['ASSIGNMENT_STALE']),
+      errors: expect.arrayContaining([expect.objectContaining({ code: 'ASSIGNMENT_STALE' })]),
+    }));
+  });
+
+  it('assignment write validation: superseded assignment heartbeat 返回 409 ASSIGNMENT_STALE', async () => {
+    const { ticket, ready } = await createReadyAssignment({ title: 'Superseded assignment test' });
+    const token = ready.assignment.assignment_token;
+
+    await request(app)
+      .post(`/api/tickets/${ticket.id}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+
+    const newerAssignment = createOrReuseAssignment({
+      ticket_id: ticket.id,
+      agent_id: 'beavy',
+      stage: 'running',
+      dispatch_event_id: ready.dispatch_id + 1,
+      target_session_key: 'agent:beavy:ticket:test',
+      target_gateway_id: 'mac-main',
+      transport: 'test',
+      dedupe_key: `superseded-${ticket.id}`,
+    });
+    expect(newerAssignment.assignment_id).not.toBe(ready.assignment_id);
+
+    const res = await request(app)
+      .post(`/api/agent/assignments/${ready.assignment_id}/heartbeat`)
+      .set('x-assignment-token', token)
+      .send({ idempotency_key: 'superseded-hb', progress: { status: 'in_progress', percent: 10 } })
+      .expect(409);
+
+    expect(res.body.code).toBe('ASSIGNMENT_STALE');
+    expect(res.body.validation_audit_id).toBeTruthy();
+    expect(res.body.machine_readable).toEqual(expect.objectContaining({
+      code: 'ASSIGNMENT_STALE',
+      codes: expect.arrayContaining(['ASSIGNMENT_STALE']),
+      errors: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'ASSIGNMENT_STALE',
+          message: expect.stringContaining('superseded_assignment'),
+        }),
+      ]),
+    }));
+  });
+
+  it('assignment write validation: dispatch_receipt 无效 dispatch_id 返回 400 与 machine_readable', async () => {
+    const { ticket, ready } = await createReadyAssignment({ title: 'Invalid receipt test' });
+    const token = ready.assignment.assignment_token;
+
+    await request(app).post(`/api/dispatch/${ready.dispatch_id}/ack`).expect(200);
+
+    const res = await request(app)
+      .post(`/api/agent/assignments/${ready.assignment_id}/reports`)
+      .set('x-assignment-token', token)
+      .send({
+        report_type: 'dispatch_receipt',
+        idempotency_key: 'invalid-dispatch-id',
+        receipt: {
+          dispatch_id: 999999,
+          ticket_id: ticket.id,
+          stage: 'queued',
+          agent: 'beavy',
+          decision: 'accepted',
+          message: 'test',
+        },
+      })
+      .expect(400);
+
+    expect(res.body.code).toBe('DISPATCH_RECEIPT_DISPATCH_ID_INVALID');
+    expect(res.body.validation_audit_id).toBeTruthy();
+    expect(res.body.machine_readable).toEqual(expect.objectContaining({
+      code: 'DISPATCH_RECEIPT_DISPATCH_ID_INVALID',
+      codes: expect.arrayContaining(['DISPATCH_RECEIPT_DISPATCH_ID_INVALID']),
+      errors: expect.any(Array),
+    }));
+  });
+
+  it('subagent queued receipt accepted 但缺 worker 时保持 queued，补 worker 后自动桥接到 running', async () => {
+    const { ticket, ready } = await createReadyAssignment({
+      execution_mode: 'subagent',
+      max_active_workers: 1,
+      title: 'Queued receipt accepted waits for worker evidence',
+    });
+    const token = ready.assignment.assignment_token;
+
+    await request(app)
+      .post(`/api/dispatch/${ready.dispatch_id}/ack`)
+      .expect(200);
+
+    const receiptRes = await request(app)
+      .post(`/api/agent/assignments/${ready.assignment_id}/reports`)
+      .send({
+        assignment_token: token,
+        report_type: 'dispatch_receipt',
+        idempotency_key: 'queued-receipt-subagent-no-worker',
+        receipt: {
+          dispatch_id: ready.dispatch_id,
+          ticket_id: ticket.id,
+          stage: 'queued',
+          agent: 'beavy',
+          decision: 'accepted',
+          message: '先确认 receipt，随后补 worker 证据。',
+        },
+      })
+      .expect(201);
+
+    expect(receiptRes.body.assignment_status).toBe('receipt_recorded');
+    expect(receiptRes.body.interpreter_result.transition_preview).toEqual(expect.objectContaining({
+      action: 'start_work',
+      suggested_status: 'running',
+      applied: false,
+      bridge_actions: ['start_work'],
+    }));
+    expect(receiptRes.body.interpreter_result.transition_error).toBe('EXECUTION_WORKER_REQUIRED');
+
+    const queuedAfterReceipt = await request(app).get(`/api/tickets/${ticket.id}`).expect(200);
+    expect(queuedAfterReceipt.body.status).toBe('queued');
+    expect(queuedAfterReceipt.body.dispatch_state).toBe('receipt_accepted');
+    expect(queuedAfterReceipt.body.execution_guard).toEqual(expect.objectContaining({
+      suppress_dispatch: false,
+      has_worker_evidence: false,
+      requires_worker: true,
+    }));
+
+    const readyAfterReceipt = await request(app)
+      .get('/api/dispatch/ready')
+      .expect(200);
+    expect(readyAfterReceipt.body.ready.find((entry) => entry.ticket_id === ticket.id)).toBeUndefined();
+
+    const workerRes = await request(app)
+      .post(`/api/tickets/${ticket.id}/workers`)
+      .send({
+        worker_key: 'subagent-auto-start',
+        worker_type: 'subagent',
+        status: 'running',
+        session_key: 'agent:beavy:ticket:auto-start',
+        run_id: 'run-auto-start',
+      })
+      .expect(201);
+
+    expect(workerRes.body.ticket.status).toBe('running');
+    expect(workerRes.body.ticket.execution_guard).toEqual(expect.objectContaining({
+      suppress_dispatch: true,
+      reason: 'active_worker_in_progress',
+      has_worker_evidence: true,
+    }));
+
+    const detailAfterWorker = await request(app).get(`/api/tickets/${ticket.id}`).expect(200);
+    expect(detailAfterWorker.body.status).toBe('running');
+  });
+
+  it('queued stale nudge 不应把 receipt accepted 但待补 running bridge 的工单当成未派发', async () => {
+    const { ticket, ready } = await createReadyAssignment({
+      execution_mode: 'subagent',
+      max_active_workers: 1,
+      title: 'Receipt accepted should not trigger queued stale nudge',
+    });
+    const token = ready.assignment.assignment_token;
+
+    await request(app)
+      .post(`/api/dispatch/${ready.dispatch_id}/ack`)
+      .expect(200);
+
+    await request(app)
+      .post(`/api/agent/assignments/${ready.assignment_id}/reports`)
+      .send({
+        assignment_token: token,
+        report_type: 'dispatch_receipt',
+        idempotency_key: 'queued-receipt-subagent-stale-guard',
+        receipt: {
+          dispatch_id: ready.dispatch_id,
+          ticket_id: ticket.id,
+          stage: 'queued',
+          agent: 'beavy',
+          decision: 'accepted',
+          message: '先接单，等待 worker bridge。',
+        },
+      })
+      .expect(201);
+
+    const staleTime = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+    const { updateTicket } = await import('./store.js');
+    updateTicket(ticket.id, { last_update: staleTime });
+
+    const readyRes = await request(app)
+      .get('/api/dispatch/ready')
+      .expect(200);
+    expect(readyRes.body.ready.find((entry) => entry.ticket_id === ticket.id && entry.kind === 'nudge')).toBeUndefined();
+    expect(readyRes.body.ready.find((entry) => entry.ticket_id === ticket.id && !entry.kind)).toBeUndefined();
   });
 
   it('done 阶段收到 review receipt accepted 后才会从 done 推进到 review', async () => {
@@ -3188,6 +3720,143 @@ describe('agent-facing task API MVP', () => {
     expect(retried.dispatch_retry_count).toBe(1);
   });
 
+  it('triage structured report 在责任链完整时会自动 bridge 到 queued', async () => {
+    const created = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Triage report auto queue',
+        description: 'triage contract smoke',
+        status: 'triage',
+        triage_owner: 'leoss',
+        assigned_agent: 'beavy',
+        review_owner: 'leoss',
+        execution_mode: 'direct',
+      })
+      .expect(201);
+
+    const readyRes = await request(app).get('/api/dispatch/ready').expect(200);
+    const ready = readyRes.body.ready.find((item) => item.ticket_id === created.body.id);
+    expect(ready).toBeDefined();
+    expect(ready.agent).toBe('leoss');
+    const token = ready.assignment.assignment_token;
+
+    const report = await request(app)
+      .post(`/api/agent/assignments/${ready.assignment_id}/reports`)
+      .send({
+        assignment_token: token,
+        report_type: 'triage_structured_report',
+        idempotency_key: 'triage-structured-auto-queue',
+        summary: '责任链完整，可直接放行执行。',
+        triage: {
+          verdict: 'queue',
+          is_executable: true,
+          route: {
+            target_status: 'queued',
+            reason: 'scope / constraints / deliverables 已明确，直接进入执行队列。',
+          },
+          responsibility: {
+            triage_owner: 'leoss',
+            assigned_agent: 'beavy',
+            review_owner: 'leoss',
+            chain_complete: true,
+            missing_fields: [],
+          },
+          suggested_next_step: {
+            action: 'queue',
+            suggested_status: 'queued',
+            reason: '开始执行',
+          },
+        },
+      })
+      .expect(201);
+
+    expect(report.body.assignment_status).toBe('in_progress');
+    expect(report.body.interpreter_result.transition_preview).toEqual(expect.objectContaining({
+      action: 'queue',
+      suggested_status: 'queued',
+      applied: true,
+      bridge_actions: ['queue'],
+      blocked_by_guard: false,
+    }));
+
+    const ticketAfter = await request(app).get(`/api/tickets/${created.body.id}`).expect(200);
+    expect(ticketAfter.body.status).toBe('queued');
+    expect(ticketAfter.body.next_actor).toBe('beavy');
+    expect(ticketAfter.body.comments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        author: 'leoss',
+        type: 'result',
+        content: expect.stringContaining('【agent_report】triage_structured_report'),
+      }),
+    ]));
+  });
+
+  it('triage structured report 缺责任链时不 auto-queue，并返回 machine-readable reason', async () => {
+    const created = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Triage report missing chain',
+        description: 'triage guard smoke',
+        status: 'triage',
+        triage_owner: 'leoss',
+        assigned_agent: 'beavy',
+        execution_mode: 'direct',
+      })
+      .expect(201);
+
+    const readyRes = await request(app).get('/api/dispatch/ready').expect(200);
+    const ready = readyRes.body.ready.find((item) => item.ticket_id === created.body.id);
+    expect(ready).toBeDefined();
+    const token = ready.assignment.assignment_token;
+
+    const report = await request(app)
+      .post(`/api/agent/assignments/${ready.assignment_id}/reports`)
+      .send({
+        assignment_token: token,
+        report_type: 'triage_structured_report',
+        idempotency_key: 'triage-structured-missing-chain',
+        summary: '责任链不完整，不能假成功 queued。',
+        triage: {
+          verdict: 'queue',
+          is_executable: true,
+          machine_reason_code: 'TRIAGE_QUEUE_CHAIN_INCOMPLETE',
+          route: {
+            target_status: 'queued',
+            reason: '执行人已明确，但 review_owner 仍缺失。',
+          },
+          responsibility: {
+            triage_owner: 'leoss',
+            assigned_agent: 'beavy',
+            chain_complete: false,
+            missing_fields: ['review_owner'],
+          },
+          suggested_next_step: {
+            action: 'fill_responsibility_chain',
+            suggested_status: 'triage',
+            reason: '先补 review_owner，再重新提交 triage report。',
+          },
+        },
+      })
+      .expect(201);
+
+    expect(report.body.assignment_status).toBe('receipt_recorded');
+    expect(report.body.interpreter_result.transition_preview).toEqual(expect.objectContaining({
+      action: null,
+      suggested_status: 'queued',
+      will_transition: false,
+      applied: false,
+      blocked_by_guard: true,
+      guard_error: 'TRIAGE_QUEUE_CHAIN_INCOMPLETE',
+    }));
+    expect(report.body.interpreter_result.transition_preview).toEqual(expect.objectContaining({
+      bridge_actions: [],
+    }));
+
+    const ticketAfter = await request(app).get(`/api/tickets/${created.body.id}`).expect(200);
+    expect(ticketAfter.body.status).toBe('triage');
+    expect(ticketAfter.body.next_actor).toBe('leoss');
+  });
+
   it('queued 工单收到 execution_completed 时，会自动桥接 start_work -> submit_for_review', async () => {
     const { ticket, ready } = await createReadyAssignment({
       execution_mode: 'direct',
@@ -3337,11 +4006,6 @@ describe('agent-facing task API MVP', () => {
     const { ticket, ready } = await createReadyAssignment();
     const token = ready.assignment.assignment_token;
 
-    await request(app)
-      .post(`/api/tickets/${ticket.id}/transition`)
-      .send({ action: 'start_work', actor: 'beavy' })
-      .expect(200);
-
     const hb1 = await request(app)
       .post(`/api/agent/assignments/${ready.assignment_id}/heartbeat`)
       .send({
@@ -3352,6 +4016,7 @@ describe('agent-facing task API MVP', () => {
       .expect(201);
 
     expect(hb1.body.assignment_status).toBe('in_progress');
+    expect(hb1.body.validation_audit_id).toBeTruthy();
 
     const hb2 = await request(app)
       .post(`/api/agent/assignments/${ready.assignment_id}/heartbeat`)
@@ -3379,6 +4044,7 @@ describe('agent-facing task API MVP', () => {
       .expect(201);
 
     expect(report1.body.assignment_status).toBe('submitted');
+    expect(report1.body.validation_audit_id).toBeTruthy();
     expect(report1.body.interpreter_result.transition_preview).toEqual(expect.objectContaining({
       action: 'submit_for_review',
       suggested_status: 'done',
@@ -3460,6 +4126,7 @@ describe('agent-facing task API MVP', () => {
       .post('/api/tickets')
       .send({
         title: 'Done with stale starting',
+        status: 'queued',
         assigned_agent: 'beavy',
         triage_owner: 'leoss',
         review_owner: 'leoss',
@@ -3497,11 +4164,6 @@ describe('agent-facing task API MVP', () => {
     const { ticket, ready } = await createReadyAssignment();
     const token = ready.assignment.assignment_token;
 
-    await request(app)
-      .post(`/api/tickets/${ticket.id}/transition`)
-      .send({ action: 'start_work', actor: 'beavy' })
-      .expect(200);
-
     const report = await request(app)
       .post(`/api/agent/assignments/${ready.assignment_id}/reports`)
       .send({
@@ -3535,6 +4197,7 @@ describe('agent-facing task API MVP', () => {
       .send({
         title: 'Remote agent-facing MVP',
         description: '验证远端 contract 不下发 localhost',
+        status: 'queued',
         assigned_agent: 'donky',
         triage_owner: 'leoss',
         review_owner: 'leoss',
@@ -3720,6 +4383,162 @@ describe('live acceptance gate API', () => {
         message: expect.stringContaining('nonexistent_action'),
       }),
     ]));
+  });
+});
+
+describe('runtime version and dispatch/review/worker contract regression', () => {
+  beforeEach(() => {
+    ensureCleanStore();
+  });
+
+  it('GET /api/version 返回运行态版本契约：git_commit、build_time、schema_version、bundle_version', async () => {
+    const res = await request(app).get('/api/version').expect(200);
+    expect(res.body.data).toEqual(expect.objectContaining({
+      schema_version: expect.any(String),
+      bundle_version: expect.any(String),
+      build_time: expect.any(String),
+    }));
+    expect(typeof res.body.data.git_commit === 'string' || res.body.data.git_commit === null).toBe(true);
+    expect(res.body.data.schema_version.length).toBeGreaterThan(0);
+    expect(res.body.data.bundle_version.length).toBeGreaterThan(0);
+    expect(res.body.data.build_time).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('live acceptance 响应包含 runtime_version，与 GET /api/version 一致', async () => {
+    const ticketRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Version gate',
+        assigned_agent: 'beavy',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        status: 'running',
+      })
+      .expect(201);
+    const versionRes = await request(app).get('/api/version').expect(200);
+    const gateRes = await request(app)
+      .get(`/api/live-acceptance/tickets/${ticketRes.body.id}`)
+      .expect(200);
+    expect(gateRes.body.data.live_surfaces.runtime_version).toBeDefined();
+    expect(gateRes.body.data.live_surfaces.runtime_version.schema_version).toBe(versionRes.body.data.schema_version);
+    expect(gateRes.body.data.live_surfaces.runtime_version.bundle_version).toBe(versionRes.body.data.bundle_version);
+    expect(gateRes.body.data.live_surfaces.runtime_version.git_commit).toBe(versionRes.body.data.git_commit);
+  });
+
+  it('dispatch ready 单条契约包含 dispatch_id、ticket_id、agent、target_session_key、target_gateway_id、transport、dedupe_key、reason、escalation_tier', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Dispatch contract',
+        description: 'Desc',
+        status: 'running',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    const res = await request(app).get('/api/dispatch/ready').expect(200);
+    const item = res.body.ready.find((r) => r.ticket_id === createRes.body.id);
+    expect(item).toBeDefined();
+    expect(item).toEqual(expect.objectContaining({
+      dispatch_id: expect.any(Number),
+      ticket_id: createRes.body.id,
+      agent: 'donky',
+      target_session_key: expect.any(String),
+      target_gateway_id: expect.any(String),
+      transport: expect.any(String),
+      dedupe_key: expect.any(String),
+      reason: expect.any(String),
+      escalation_tier: expect.any(String),
+    }));
+    expect(item.target_session_key).toBe(`agent:donky:ticket:${createRes.body.id}`);
+    expect(item.dedupe_key).toBe('dispatch:running:assignment:donky');
+  });
+
+  it('review 链：done 工单进入 dispatch ready 给 review_owner，receipt accepted 后推进 start_review', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Review chain',
+        description: 'Desc',
+        status: 'queued',
+        triage_owner: 'leoss',
+        review_owner: 'beavy',
+        assigned_agent: 'donky',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'start_work', actor: 'donky' })
+      .expect(200);
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'submit_for_review', actor: 'donky', result_summary: 'done' })
+      .expect(200);
+
+    const dispatchRes = await request(app).get('/api/dispatch/ready').expect(200);
+    const readyItem = dispatchRes.body.ready.find((r) => r.ticket_id === ticketId);
+    expect(readyItem).toBeDefined();
+    expect(readyItem.agent).toBe('beavy');
+    expect(readyItem.reason).toBe('done');
+    const assignmentId = readyItem.assignment_id;
+    const token = readyItem.assignment?.assignment_token;
+    expect(assignmentId).toBeDefined();
+    expect(token).toBeDefined();
+
+    await request(app).post(`/api/dispatch/${readyItem.dispatch_id}/ack`).expect(200);
+    await request(app)
+      .post(`/api/v1/agent/assignments/${assignmentId}/reports`)
+      .set('x-assignment-token', token)
+      .send({
+        report_type: 'dispatch_receipt',
+        idempotency_key: 'review-receipt-1',
+        receipt: {
+          dispatch_id: readyItem.dispatch_id,
+          ticket_id: ticketId,
+          stage: 'done',
+          agent: 'beavy',
+          decision: 'accepted',
+          message: 'reviewer 已接单',
+        },
+        progress: { status: 'in_progress', percent: 5, message: 'accepted' },
+      })
+      .expect(201);
+
+    const ticketAfter = await request(app).get(`/api/tickets/${ticketId}`).expect(200);
+    expect(ticketAfter.body.status).toBe('review');
+  });
+
+  it('worker 契约：POST /workers 必填 worker_key/worker_type，返回 execution_guard 含 suppress_dispatch、requires_worker、has_worker_evidence', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Worker contract',
+        description: 'Desc',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        assigned_agent: 'beavy',
+        execution_mode: 'subagent',
+        max_active_workers: 1,
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+    const workerRes = await request(app)
+      .post(`/api/tickets/${ticketId}/workers`)
+      .send({ worker_key: 'sub-1', worker_type: 'subagent', run_id: 'run-1', session_key: 'agent:beavy:ticket:1' })
+      .expect(201);
+    expect(workerRes.body.worker).toEqual(expect.objectContaining({
+      worker_key: 'sub-1',
+      worker_type: 'subagent',
+    }));
+    expect(workerRes.body.ticket.execution_guard).toEqual(expect.objectContaining({
+      suppress_dispatch: true,
+      requires_worker: true,
+      has_worker_evidence: true,
+      active_workers: 1,
+      total_workers: 1,
+    }));
   });
 });
 
@@ -3973,6 +4792,7 @@ describe('agent-facing ticket action APIs', () => {
       .send({
         title: 'Agent action ticket',
         description: 'for agent-facing ticket action api tests',
+        status: 'queued',
         assigned_agent: 'beavy',
         triage_owner: 'leoss',
         review_owner: 'leoss',
@@ -4019,13 +4839,13 @@ describe('agent-facing ticket action APIs', () => {
     expect(actions.map((item) => item.key)).toEqual(expect.arrayContaining(['create', 'pause', 'resume', 'approve', 'reject']));
   }
 
-  it('POST /api/agent/tickets happy path：按 actor 创建 queued 工单', async () => {
+  it('POST /api/agent/tickets happy path：按 actor 创建 triage 工单', async () => {
     const res = await request(app)
       .post('/api/agent/tickets')
       .send({
         actor: 'beavy',
         title: 'Agent-facing create',
-        description: '只允许创建自己名下 queued 工单',
+        description: '只允许创建自己名下 triage 工单',
         implementation_scope: '补最小 API 测试',
       })
       .expect(201);
@@ -4035,13 +4855,13 @@ describe('agent-facing ticket action APIs', () => {
       action: 'create',
       ticket: expect.objectContaining({
         title: 'Agent-facing create',
-        status: 'queued',
+        status: 'triage',
         assigned_agent: 'beavy',
         triage_owner: 'leoss',
         review_owner: 'leoss',
-        next_actor: 'beavy',
+        next_actor: 'leoss',
       }),
-      available_actions: expect.arrayContaining(['start_work']),
+      available_actions: expect.arrayContaining(['queue', 'pause']),
     }));
   });
 
