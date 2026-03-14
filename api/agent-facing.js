@@ -15,6 +15,7 @@ export const AGENT_REPORT_TYPES = [
   'blocked_report',
   'decision_request',
   'review_submission',
+  'triage_structured_report',
   'artifact_upload',
   'workflow_warning',
   'handoff_note',
@@ -212,10 +213,12 @@ function buildAgentTicketActionApis({ apiBaseUrl = null } = {}) {
     actor: '<paused_by>'
   };
   const approveExample = {
-    actor: '<review_owner>'
+    actor: '<review_owner>',
+    assignment_id: '<current_assignment_id>'
   };
   const rejectExample = {
     actor: '<review_owner>',
+    assignment_id: '<current_assignment_id>',
     reject_reason: '验收未通过：请补齐 reviewer write path 的 live smoke 与 contract 说明。'
   };
   const pauseMeta = getWorkflowActionMeta('pause');
@@ -228,7 +231,7 @@ function buildAgentTicketActionApis({ apiBaseUrl = null } = {}) {
       method: 'POST',
       endpoint: '/api/v1/agent/tickets',
       url: appendApiBaseUrl(apiBaseUrl, '/api/v1/agent/tickets'),
-      summary: '创建新工单；status 固定 queued，平台仍是 single writer。',
+      summary: '创建新工单；status 固定 triage，平台仍是 single writer。triage -> queue 须由 triage_owner 放行，且工单须已具备 assigned_agent 与 review_owner。',
       identity_field: 'actor',
       request_fields: [
         { key: 'actor', type: 'string', required: true, description: '发起 create 的 agent id；必须是平台注册 agent。' },
@@ -247,7 +250,8 @@ function buildAgentTicketActionApis({ apiBaseUrl = null } = {}) {
         { key: 'assigned_agent', type: 'string', required: false, description: '可留空；若提供，当前仅允许等于 actor。' },
       ],
       constraints: [
-        'status 固定 queued，不允许通过 create 直接把 ticket 建成 running/done/complete。',
+        'status 固定 triage，不允许通过 create 直接把 ticket 建成 queued/running/done/complete。',
+        'triage -> queue 须责任链已落链：assigned_agent、review_owner 必填；缺一则 transition queue 返回 409 TRIAGE_QUEUE_CHAIN_INCOMPLETE。',
         'triage_owner/review_owner/decision_owner/next_actor 不允许由 agent-facing create 直接覆盖。',
         'assigned_agent 只能留空或等于 actor，避免 agent 借 create 代他人提单/改派单。',
       ],
@@ -335,10 +339,13 @@ function buildAgentTicketActionApis({ apiBaseUrl = null } = {}) {
       allowed_statuses: approveMeta?.from || [],
       request_fields: [
         { key: 'actor', type: 'string', required: true, description: '必须等于当前 workflow 解释出的 review_owner。' },
+        { key: 'assignment_id', type: 'string', required: true, description: '当前 reviewer assignment_id；需配合 assignment_token 一起提交。' },
       ],
       constraints: [
         '只有 available_actions 包含 approve 时才能调用。',
         'actor 必须等于当前 action.role_key=review_owner 解析出的身份。',
+        'review 阶段必须携带当前 assignment_id + assignment_token。',
+        'approve 前必须已通过 report API 成功提交至少一条 review_submission。',
       ],
       response_contract: {
         status_code: 200,
@@ -363,11 +370,14 @@ function buildAgentTicketActionApis({ apiBaseUrl = null } = {}) {
       allowed_statuses: rejectMeta?.from || [],
       request_fields: [
         { key: 'actor', type: 'string', required: true, description: '必须等于当前 workflow 解释出的 review_owner。' },
+        { key: 'assignment_id', type: 'string', required: true, description: '当前 reviewer assignment_id；需配合 assignment_token 一起提交。' },
         { key: 'reject_reason', type: 'string', required: true, description: '打回原因；会进入 workflow reject metadata。' },
       ],
       constraints: [
         '只有 available_actions 包含 reject 时才能调用。',
         'actor 必须等于当前 action.role_key=review_owner 解析出的身份。',
+        'review 阶段必须携带当前 assignment_id + assignment_token。',
+        'reject 前必须已通过 report API 成功提交至少一条 review_submission。',
         'reject_reason 必填，避免 reviewer 无因打回。',
       ],
       response_contract: {
@@ -665,6 +675,7 @@ function buildHostedSkillMarkdown() {
     '5. 执行过程中只提交 heartbeat / reports；由平台解释为 comment / transition / notify。',
     '5.1 assignment 送达后先提交 dispatch_receipt；平台只在 receipt.decision=accepted 时推进 queued->running / done->review；若 stage=review，则仅确认 reviewer 已正式接单并停止重派。',
     '6. 若当前需要正式提单、挂起/恢复，或 reviewer 需要 approve/reject，优先使用 agent-facing ticket action API，而不是猜测 comment/transition 直写。',
+    '6.1 reviewer 阶段必须遵循 dispatch_receipt -> review_submission -> approve/reject 顺序；不能 receipt 后直接关单或打回。',
     '',
     '## 强约束',
     '- single-writer：平台是 ticket comment / transition 的唯一写入者。',
@@ -710,6 +721,7 @@ function buildHostedSkillMarkdown() {
     '- 这些接口仍由平台执行 workflow 写入；agent 不能借此直接绕过 single-writer。',
     '- create 只允许创建 queued 新单；pause/resume/approve/reject 都只允许按 workflow allowed_actions 执行。',
     '- review_owner 可在 done/review 阶段通过 approve/reject 受控推进 complete 或打回 queued；这仍由平台统一写 workflow。',
+    '- reviewer 不能在 dispatch_receipt 后直接 approve/reject；必须先提交 review_submission 留下正式验收结论。',
     '- running/paused -> queued 的 `reset_to_queued` 属于平台管理动作，不在 agent-facing ticket_actions 直写范围内；应由 triage_owner 通过常规 transition 管理面执行，并填写 `reason`。',
     '- 调用前先看 runtime context / workflow schema / available_actions，避免猜当前是否可 pause/resume/approve/reject。',
   );
@@ -756,6 +768,7 @@ function buildHostedSkillMarkdown() {
     '- assignment 送达后先回 dispatch_receipt；只有 receipt=accepted 才会推进 queued->running / done->review；review 阶段则只确认正式接单并停止重派。',
     '- 进入执行后尽快发 heartbeat；关键里程碑用 progress_update。',
     '- 执行完成后优先提交 execution_completed 或 review_submission。',
+    '- 若当前是 reviewer assignment，则必须先提交 review_submission，再调用 approve/reject。',
     '- 若遇阻塞，提交 blocked_report；若需要老大拍板，提交 decision_request。',
     '',
     '## Stock Workboard API（平台内置 discoverability）',

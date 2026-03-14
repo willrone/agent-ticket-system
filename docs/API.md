@@ -13,6 +13,27 @@ http://127.0.0.1:8788/api
 
 ---
 
+## 运行态版本（version / live acceptance 先核）
+
+### GET /api/version
+无需鉴权，返回运行态版本表面，供 reviewer / live acceptance 首先核对 runtime contract。
+
+响应示例：
+```json
+{
+  "data": {
+    "git_commit": "a1b2c3d...",
+    "build_time": "2026-03-13T00:00:00.000Z",
+    "schema_version": "2026-03-12",
+    "bundle_version": "2026-03-12.bundle.v8"
+  }
+}
+```
+
+Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/version` 并与 live acceptance 响应中的 `runtime_version` 一致后，再继续 bundle、dependency 等校验。详见 `docs/reference/api.md`。
+
+---
+
 ## 状态转换 API（核心）
 
 ### POST /tickets/:id/transition
@@ -179,13 +200,14 @@ http://127.0.0.1:8788/api
 
 ### POST /tickets
 
-**描述**：创建工单。人类/控制台入口允许显式提供 `review_owner`，平台会把它作为 `done/review` 阶段的通用 reviewer routing / notifications 责任人。
+**描述**：创建工单。未显式传 `status` 时默认为 `triage`（不再默认 queued）。人类/控制台入口允许显式提供 `review_owner`，平台会把它作为 `done/review` 阶段的通用 reviewer routing / notifications 责任人。
 
 **请求体**：
 ```json
 {
   "title": "工单标题",
   "description": "工单描述",
+  "status": "triage",
   "assigned_agent": "beavy",
   "triage_owner": "leoss",
   "review_owner": "ronghui",
@@ -194,19 +216,20 @@ http://127.0.0.1:8788/api
 }
 ```
 
-**响应**：
+**响应**（未传 status 时默认 triage）：
 ```json
 {
   "id": 1,
-  "status": "queued",
+  "status": "triage",
   "assigned_agent": "beavy",
   "review_owner": "ronghui",
-  "current_actor": "beavy",
-  "next_actor": "beavy"
+  "current_actor": "leoss",
+  "next_actor": "leoss"
 }
 ```
 
 **说明**：
+- `status` 未传时默认为 `triage`；显式传 `queued` 等亦可，但 triage -> queue 须经 transition `action=queue`，且工单须已具备 `assigned_agent`、`review_owner`，缺一则返回 409 `TRIAGE_QUEUE_CHAIN_INCOMPLETE`。
 - `review_owner` 未提供时默认回退到 `triage_owner`
 - 当工单进入 `done/review` 时，`current_actor/next_actor` 会显式切到 `review_owner`，并进入 `/api/dispatch/ready` 的 reviewer 主交接链；`/api/notifications/ready` 不再承担 reviewer 主交接
 
@@ -214,7 +237,7 @@ http://127.0.0.1:8788/api
 
 ### PATCH /tickets/:id
 
-**描述**：更新工单字段（禁止直接修改 status）。可用于补充/改派 `review_owner`，并让 reviewer routing / notifications 立即按新值重算。
+**描述**：更新工单字段（禁止直接修改 status）。可用于补充/改派 `review_owner`，设置 `review_plan`/`review_state`（多轮多 reviewer 合约），并让 reviewer routing / notifications 立即按新值重算。
 
 **请求体**：
 ```json
@@ -451,13 +474,26 @@ http://127.0.0.1:8788/api
 
 ### POST /api/v1/agent/assignments/:assignment_id/heartbeat
 
-**描述**：提交 assignment 心跳；支持 `idempotency_key` 幂等。
+**描述**：提交 assignment 心跳；支持 `idempotency_key` 幂等。经 **assignment write validation gateway** 校验：assignment 与 ticket 一致、delivery 非 stale 才接受；成功/失败均写 validation audit，响应含 `validation_audit_id`。
+
+### Assignment Write Validation Gateway
+
+heartbeat / reports（及可选带 assignment_token 的 reviewer 写动作）统一经网关校验：
+
+- **身份**：assignment_id + assignment_token 已由 `loadAssignmentAccess` 校验。
+- **Expected truth**：assignment.ticket_id 与 ticket.id 一致。
+- **Stale/live**：若 ticket 状态在派单后已变更（或 supplemental 主单已 complete），视为 stale，写操作返回 **409**，`code: ASSIGNMENT_STALE`。
+- **dispatch_receipt 强校验**：receipt 的 `dispatch_id` / `ticket_id` / `stage` / `agent` 须与 assignment 及 dispatch 事件一致；否则 **400**，machine-readable `code` 见下。
+
+**Machine-readable 错误码**：`ASSIGNMENT_TICKET_MISMATCH`、`ASSIGNMENT_STALE`、`DISPATCH_RECEIPT_DISPATCH_ID_INVALID`、`DISPATCH_RECEIPT_TICKET_ID_MISMATCH`、`DISPATCH_RECEIPT_STAGE_MISMATCH`、`DISPATCH_RECEIPT_AGENT_MISMATCH`、`DISPATCH_RECEIPT_MISSING_FIELDS`。错误响应含 `code`、`validation_audit_id`、`machine_readable: { code, codes, errors[] }`。
 
 ### POST /api/v1/agent/assignments/:assignment_id/reports
 
-**描述**：提交结构化 report；平台会统一解释为 comment / transition / notify / audit。
+**描述**：提交结构化 report；经 assignment write validation gateway 校验后，平台统一解释为 comment / transition / notify / audit。成功/失败均写 validation audit，响应含 `validation_audit_id`。
 
 > 约束：`execution_mode=subagent/acp` 的 `execution_completed` / `review_submission` 在没有真实 worker 证据（`ticket.worker_stats/current_workers/execution_workers`）时不会自动提审，避免 ticket session 直接冒充下沉执行闭环。
+>
+> **reviewer 硬约束**：对 `done/review` 阶段的 reviewer assignment，必须遵循 `dispatch_receipt -> review_submission -> approve/reject` 顺序。仅有 `dispatch_receipt` 不足以直接 complete/queued；若未先成功提交 `review_submission`，agent-facing `approve/reject` 会返回冲突错误。
 
 **当前 workflow bridge 规则**：
 - `dispatch_receipt`：
@@ -468,7 +504,7 @@ http://127.0.0.1:8788/api
 - `execution_completed` / `review_submission`：
   - `queued`：自动桥接 `start_work -> submit_for_review`
   - `running`：直接执行 `submit_for_review`
-  - `done/review/complete`：不重复推进，只保留 report/comment 与 assignment submitted 语义
+  - `done/review/complete`：不重复推进状态，但 `review_submission` 仍作为 reviewer 验收结论留痕，并可作为后续 approve/reject 的前置证据
 - `decision_request` / `blocked_report` / `execution_failed`：在 `queued` 场景下也会先自动桥接 `start_work`，再落到目标状态
 - assignment 只有在 ticket 真正到达对应 workflow 阶段（或已处于等价终态）后，才会进入 `submitted / waiting_on_decision / waiting_on_dependency / failed_execution`
 
