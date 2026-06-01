@@ -14,8 +14,20 @@ dist-ssr
 
 data/*.db-shm
 data/*.db-wal
+data/agent-ticket-system.db
+data/agent-ticket-system.db-shm
+data/agent-ticket-system.db-wal
+data/backups/*.db-shm
+data/backups/*.db-wal
 api/data/*.db-shm
 api/data/*.db-wal
+api/data/test-*.db
+api/data/test-*.db-shm
+api/data/test-*.db-wal
+api/data/legacy-*.db
+api/data/legacy-*.db-shm
+api/data/legacy-*.db-wal
+.rollout/
 
 # Editor directories and files
 .vscode/*

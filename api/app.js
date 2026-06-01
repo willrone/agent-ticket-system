@@ -2,7 +2,7 @@
  * Express 应用 - 导出 app 供测试使用，server.js 仅负责 listen
  */
 import express from 'express';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as store from './store.js';
@@ -37,12 +37,11 @@ import { TRANSITIONS, transition, getAvailableActions, findRunningEntryConflict 
 import { getAuditSessionKeyForTicket, getNotificationSessionKey } from './agent-session-router.js';
 import { resolveDispatchDelivery, resolveNotificationDelivery } from './agent-delivery-router.js';
 import { getAgentTopologyRegistry } from './agent-topology.js';
+import { buildParticipantRegistrySnapshot, getParticipantById, resolveParticipantRoute } from './participant-registry.js';
 import { previewTicketSessionCleanup, runTicketSessionCleanup } from './ticket-session-cleanup.js';
 import { broadcastTicketStatusChanged, broadcastTicketComment } from './websocket.js';
 import {
   EXECUTION_MODES,
-  executionModeRequiresWorker,
-  getExecutionWorkerEvidence,
   isExecutionWorkerActiveStatus,
   normalizeExecutionMode,
 } from '../execution-policy.js';
@@ -58,9 +57,11 @@ import {
   buildAssignmentContract,
   buildCurrentAgentSkillBundle,
   buildDependencySnapshot,
+  buildPlaybookStageSnapshot,
   buildRuntimeContext,
   classifyCommentActor,
   getAgentApiBaseUrl,
+  getAgentTicketActionRouteBindings,
   resolveAssignmentToken,
 } from './agent-facing.js';
 import {
@@ -79,7 +80,21 @@ import { validateDispatchAdvanceChain } from './dispatch-advance-chain.js';
 import {
   validateTicketPlatformAssignedAgent,
   resolveTicketPlatformAssignedAgent,
+  resolveDefaultTriageOwner,
 } from './ticket-platform-rules.js';
+import { buildTicketControlReadModel } from './control-read-model.js';
+import { buildParentChildSummary, enrichTicketForApi } from './ticket-enrichment.js';
+import { buildLiveAcceptanceGate } from './live-acceptance.js';
+import { buildAgentDispatchMessage } from './dispatch-message-builder.js';
+import { buildDispatchEventGovernance, buildDispatchReadyProjection } from './dispatch-ready-projection.js';
+import { registerTicketReadRoutes } from './ticket-read-routes.js';
+import { buildRoutingPreview } from './platform-routing.js';
+import {
+  DEFAULT_PLATFORM_CAPABILITIES,
+  DEFAULT_PLATFORM_AGENTS,
+  DEFAULT_ROLE_CONTRACTS,
+  DEFAULT_WORKFLOW_TEMPLATES,
+} from './platform-registry-defaults.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -146,244 +161,6 @@ function normalizeParentTicketId(value) {
   return { ok: true, value: parsed };
 }
 
-function parseExpectedListParam(value) {
-  if (Array.isArray(value)) {
-    return value
-      .flatMap((item) => parseExpectedListParam(item))
-      .filter(Boolean);
-  }
-  if (typeof value !== 'string') return [];
-  return value.split(',').map((item) => item.trim()).filter(Boolean);
-}
-
-function buildLiveAcceptanceGate(ticket, options = {}) {
-  const enriched = enrichTicketForApi(ticket);
-  const assignment = store.findLatestAssignmentForTicket(enriched.id);
-  const runtimeContext = buildRuntimeContext({ assignment });
-  const bundle = buildCurrentAgentSkillBundle();
-  const workflow = buildAgentWorkflowSchema();
-  const topology = getAgentTopologyRegistry();
-
-  const expectedBundleVersion = normalizeOptionalText(options.expectedBundleVersion, 255) || null;
-  const expectedBundleChecksum = normalizeOptionalText(options.expectedBundleChecksum, 255) || null;
-  const requiredTicketActions = parseExpectedListParam(options.requiredTicketActions);
-  const requiredBootstrapEndpoints = parseExpectedListParam(options.requiredBootstrapEndpoints);
-  const requiredWorkboards = parseExpectedListParam(options.requiredWorkboards);
-
-  const dependencies = store.getDependencies(enriched.id).map((dep) => {
-    const depTicket = enrichTicketForApi(store.getTicketById(dep.depends_on_ticket_id) || {
-      id: dep.depends_on_ticket_id,
-      title: dep.title,
-      status: dep.status,
-      comments: [],
-    });
-    return {
-      ticket_id: dep.depends_on_ticket_id,
-      title: depTicket.title,
-      status: depTicket.status,
-      counts_as_closed: Boolean(getStatusMeta(depTicket.status)?.counts_as_closed),
-      dependency_type: dep.dependency_type || 'blocks',
-    };
-  });
-  const unresolvedDependencies = dependencies.filter((item) => !item.counts_as_closed);
-
-  const bundleTicketActions = Array.isArray(bundle.manifest?.ticket_actions)
-    ? bundle.manifest.ticket_actions.map((item) => item.key).filter(Boolean)
-    : [];
-  const runtimeWorkboards = Array.isArray(runtimeContext.workboards)
-    ? runtimeContext.workboards.map((item) => item.key).filter(Boolean)
-    : [];
-
-  const contractMismatches = [];
-  const warnings = [];
-
-  if (runtimeContext.namespace?.canonical_prefix !== AGENT_API_PREFIX) {
-    contractMismatches.push({
-      code: 'runtime-namespace-mismatch',
-      message: `runtime context canonical_prefix=${runtimeContext.namespace?.canonical_prefix || 'null'}，预期 ${AGENT_API_PREFIX}`,
-    });
-  }
-  if (runtimeContext.auth?.preferred_transport?.name !== 'X-Assignment-Token') {
-    contractMismatches.push({
-      code: 'auth-transport-mismatch',
-      message: `runtime context preferred auth=${runtimeContext.auth?.preferred_transport?.name || 'null'}，预期 X-Assignment-Token`,
-    });
-  }
-  if (runtimeContext.request_id?.header !== 'X-Request-Id' || runtimeContext.request_id?.error_field !== 'request_id') {
-    contractMismatches.push({
-      code: 'request-id-contract-mismatch',
-      message: 'runtime context request_id contract 与当前 canonical 约定不一致',
-    });
-  }
-  if (runtimeContext.error_model?.shape?.detail !== 'string' || runtimeContext.error_model?.shape?.request_id !== 'string') {
-    contractMismatches.push({
-      code: 'error-model-mismatch',
-      message: 'runtime context error_model 未保持 {detail, request_id} canonical 形状',
-    });
-  }
-  if (runtimeContext.skill_ref?.version !== bundle.version || runtimeContext.playbook_ref?.version !== bundle.version) {
-    contractMismatches.push({
-      code: 'bundle-version-mismatch',
-      message: 'runtime context 引用的 bundle version 与 live hosted bundle 不一致',
-      evidence: {
-        runtime_skill_version: runtimeContext.skill_ref?.version || null,
-        runtime_playbook_version: runtimeContext.playbook_ref?.version || null,
-        live_bundle_version: bundle.version,
-      },
-    });
-  }
-  if (runtimeContext.skill_ref?.checksum_sha256 !== bundle.checksum_sha256 || runtimeContext.playbook_ref?.checksum_sha256 !== bundle.checksum_sha256) {
-    contractMismatches.push({
-      code: 'bundle-checksum-mismatch',
-      message: 'runtime context 引用的 checksum 与 live hosted bundle 不一致',
-      evidence: {
-        runtime_skill_checksum: runtimeContext.skill_ref?.checksum_sha256 || null,
-        runtime_playbook_checksum: runtimeContext.playbook_ref?.checksum_sha256 || null,
-        live_bundle_checksum: bundle.checksum_sha256,
-      },
-    });
-  }
-
-  for (const key of requiredTicketActions) {
-    if (!bundleTicketActions.includes(key)) {
-      contractMismatches.push({
-        code: 'missing-ticket-action',
-        message: `live hosted bundle 缺少 required ticket action: ${key}`,
-      });
-    }
-  }
-
-  for (const key of requiredBootstrapEndpoints) {
-    if (!runtimeContext.bootstrap?.[key]) {
-      contractMismatches.push({
-        code: 'missing-bootstrap-endpoint',
-        message: `runtime context 缺少 required bootstrap endpoint: ${key}`,
-      });
-    }
-  }
-
-  for (const key of requiredWorkboards) {
-    if (!runtimeWorkboards.includes(key)) {
-      contractMismatches.push({
-        code: 'missing-workboard',
-        message: `runtime context 缺少 required workboard: ${key}`,
-      });
-    }
-  }
-
-  if (!runtimeContext.api_base_url) {
-    warnings.push({
-      code: 'api-base-url-missing',
-      message: 'runtime context 未提供 api_base_url，reviewer 无法据此确认 agent 应访问的 live 平台地址',
-    });
-  }
-  if (!topology?.main_gateway_id) {
-    warnings.push({
-      code: 'gateway-topology-missing',
-      message: 'agent topology 缺少 main_gateway_id，gateway 健康信号不完整',
-    });
-  }
-  if (!assignment) {
-    warnings.push({
-      code: 'assignment-missing',
-      message: 'ticket 当前没有 live assignment，无法完整验证 assignment/runtime/receipt 断面',
-    });
-  }
-  if (enriched.execution_mode !== 'direct' && !enriched.execution_guard?.has_worker_evidence) {
-    warnings.push({
-      code: 'worker-evidence-missing',
-      message: `execution_mode=${enriched.execution_mode} 但当前缺少 worker evidence，live 收口仍可能被 guard 拦截`,
-    });
-  }
-
-  let verdict = 'pass';
-  if (expectedBundleVersion && expectedBundleVersion !== bundle.version) {
-    verdict = 'live-not-upgraded';
-  } else if (expectedBundleChecksum && expectedBundleChecksum !== bundle.checksum_sha256) {
-    verdict = 'live-not-upgraded';
-  } else if (unresolvedDependencies.length > 0) {
-    verdict = 'dependency-not-closed';
-  } else if (contractMismatches.length > 0) {
-    verdict = 'contract-mismatch';
-  } else if (warnings.length > 0) {
-    verdict = 'partial';
-  }
-
-  const summaryMap = {
-    pass: 'live acceptance gate 通过：关键 live contract 断面已对齐。',
-    partial: 'live acceptance gate 部分通过：核心 contract 可读，但仍有 live 健康/证据缺口。',
-    'live-not-upgraded': 'live acceptance gate 判定 live-not-upgraded：当前 live bundle/version 尚未达到预期。',
-    'contract-mismatch': 'live acceptance gate 判定 contract-mismatch：live 断面之间存在 contract 不一致。',
-    'dependency-not-closed': 'live acceptance gate 判定 dependency-not-closed：仍有未闭合依赖阻止 reviewer 视作完整交付。',
-  };
-
-  return {
-    verdict,
-    summary: summaryMap[verdict],
-    ticket: {
-      id: enriched.id,
-      status: enriched.status,
-      current_actor: enriched.current_actor,
-      current_actor_source: enriched.current_actor_source,
-      execution_mode: enriched.execution_mode,
-      execution_guard: enriched.execution_guard,
-    },
-    live_surfaces: {
-      workflow_schema: {
-        status_count: Array.isArray(workflow.statuses) ? workflow.statuses.length : 0,
-        action_count: Array.isArray(workflow.actions) ? workflow.actions.length : 0,
-      },
-      runtime_context: {
-        api_base_url: runtimeContext.api_base_url,
-        canonical_prefix: runtimeContext.namespace?.canonical_prefix || null,
-        auth_transport: runtimeContext.auth?.preferred_transport?.name || null,
-        skill_ref: runtimeContext.skill_ref || null,
-        playbook_ref: runtimeContext.playbook_ref || null,
-      },
-      hosted_bundle: {
-        version: bundle.version,
-        checksum_sha256: bundle.checksum_sha256,
-        ticket_actions: bundleTicketActions,
-        workboards: runtimeWorkboards,
-      },
-      assignment: assignment ? {
-        assignment_id: assignment.assignment_id,
-        assignment_status: assignment.assignment_status,
-        gateway_id: assignment.gateway_id || null,
-        transport: assignment.transport || null,
-      } : null,
-      topology: {
-        main_gateway_id: topology?.main_gateway_id || null,
-        gateway_count: topology?.gateways ? Object.keys(topology.gateways).length : 0,
-      },
-      runtime_version: getRuntimeVersion(),
-      dependencies: {
-        total: dependencies.length,
-        unresolved: unresolvedDependencies.length,
-        items: dependencies,
-      },
-    },
-    expectations: {
-      expected_bundle_version: expectedBundleVersion,
-      expected_bundle_checksum: expectedBundleChecksum,
-      required_ticket_actions: requiredTicketActions,
-      required_bootstrap_endpoints: requiredBootstrapEndpoints,
-      required_workboards: requiredWorkboards,
-    },
-    issues: {
-      contract_mismatches: contractMismatches,
-      warnings,
-      unresolved_dependencies: unresolvedDependencies,
-      live_not_upgraded: verdict === 'live-not-upgraded' ? {
-        expected_bundle_version: expectedBundleVersion,
-        expected_bundle_checksum: expectedBundleChecksum,
-        actual_bundle_version: bundle.version,
-        actual_bundle_checksum: bundle.checksum_sha256,
-      } : null,
-    },
-    generated_at: new Date().toISOString(),
-  };
-}
 
 function normalizeOptionalWorkerLimit(value) {
   if (value === undefined) return { ok: true, value: undefined };
@@ -451,7 +228,7 @@ function listKnownAgentIds() {
   return Object.keys(getAgentTopologyRegistry().agent_gateway_map || {}).sort();
 }
 
-function validateAgentFacingActor(actor) {
+function validateAgentFacingActor(actor, options = {}) {
   const requestedActor = normalizeOptionalAgent(actor);
   if (!requestedActor) {
     return {
@@ -461,10 +238,24 @@ function validateAgentFacingActor(actor) {
     };
   }
 
+  const allowedActorIds = Array.isArray(options.allowedActorIds)
+    ? options.allowedActorIds.map((item) => normalizeOptionalAgent(item)).filter(Boolean)
+    : [];
   const knownAgents = listKnownAgentIds();
   if (!knownAgents.includes(requestedActor)) {
-    const humanAliases = ['ronghui', '荣晖'];
-    const isHumanPrincipal = humanAliases.includes(String(requestedActor).trim().toLowerCase()) || humanAliases.includes(String(requestedActor).trim());
+    const participant = getParticipantById(requestedActor);
+    const isHumanPrincipal = participant?.participant_type === 'human'
+      || participant?.role_type === 'human_principal'
+      || Boolean(participant?.capabilities?.includes('participant_type:human_principal'));
+    if (!isHumanPrincipal && allowedActorIds.includes(requestedActor)) {
+      return {
+        ok: true,
+        actor: requestedActor,
+        requested_actor: requestedActor,
+        alias_applied: false,
+        identity_source: 'assignment_agent',
+      };
+    }
     return {
       ok: false,
       status: 403,
@@ -480,7 +271,13 @@ function validateAgentFacingActor(actor) {
     };
   }
 
-  return { ok: true, actor: requestedActor, requested_actor: requestedActor, alias_applied: false };
+  return {
+    ok: true,
+    actor: requestedActor,
+    requested_actor: requestedActor,
+    alias_applied: false,
+    identity_source: 'platform_agent',
+  };
 }
 
 function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = null } = {}) {
@@ -524,7 +321,7 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
         },
       };
     }
-    if (status !== 'triage') {
+    if (!['triage', 'queued'].includes(status)) {
       return {
         ok: false,
         status: 400,
@@ -532,6 +329,7 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
           error: 'Bad request',
           message: '创建工单只能使用 triage 状态；其他状态必须通过 transition 推进',
           allowed_create_status: 'triage',
+          allowed_fixture_statuses: ['triage', 'queued'],
         },
       };
     }
@@ -573,7 +371,7 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
   }
 
   if (agentFacing) {
-    const forbiddenFields = ['status', 'triage_owner', 'review_owner', 'decision_owner', 'decision_summary', 'decision_context', 'next_actor', 'review_plan', 'review_state'];
+    const forbiddenFields = ['status', 'decision_owner', 'decision_summary', 'decision_context', 'next_actor', 'review_plan', 'review_state'];
     const providedForbidden = forbiddenFields.filter((field) => body?.[field] !== undefined && body?.[field] !== null && body?.[field] !== '');
     if (providedForbidden.length > 0) {
       return {
@@ -593,19 +391,6 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
     ? (resolveTicketPlatformAssignedAgent(platform, requestedAgent, { defaultToExecutor: true }) ?? actor)
     : (resolveTicketPlatformAssignedAgent(platform, requestedAgent, { defaultToExecutor: true }) ?? 'donky');
 
-  if (agentFacing && targetAgent !== actor) {
-    return {
-      ok: false,
-      status: 403,
-      body: {
-        error: 'AGENT_ACTION_FORBIDDEN',
-        message: 'assigned_agent 只能留空或等于 actor',
-        actor,
-        assigned_agent: targetAgent,
-      },
-    };
-  }
-
   const platformAgentValidation = validateTicketPlatformAssignedAgent(platform, targetAgent);
   if (!platformAgentValidation.ok) {
     return {
@@ -620,8 +405,12 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
     };
   }
 
-  const normalizedTriageOwner = agentFacing ? DEFAULT_TRIAGE_OWNER : (normalizeOptionalAgent(triage_owner) ?? DEFAULT_TRIAGE_OWNER);
-  const normalizedReviewOwner = agentFacing ? normalizedTriageOwner : (normalizeOptionalAgent(review_owner) ?? normalizedTriageOwner);
+  const normalizedTriageOwner = agentFacing
+    ? (normalizeOptionalAgent(triage_owner) ?? resolveDefaultTriageOwner(platform, DEFAULT_TRIAGE_OWNER))
+    : (normalizeOptionalAgent(triage_owner) ?? resolveDefaultTriageOwner(platform, DEFAULT_TRIAGE_OWNER));
+  const normalizedReviewOwner = agentFacing
+    ? (normalizeOptionalAgent(review_owner) ?? normalizedTriageOwner)
+    : (normalizeOptionalAgent(review_owner) ?? normalizedTriageOwner);
   const normalizedDecisionOwner = agentFacing ? null : normalizeOptionalAgent(decision_owner);
   const normalizedReviewPlan = normalizeReviewPlan(review_plan, { fallbackReviewOwner: normalizedReviewOwner });
   if (!normalizedReviewPlan.ok) {
@@ -634,7 +423,7 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
     payload: {
       title: title.trim(),
       description: normalizeOptionalText(description, 20000) ?? '',
-      status: 'triage',
+      status: !agentFacing && status === 'queued' ? 'queued' : 'triage',
       triage_owner: normalizedTriageOwner,
       review_owner: normalizedReviewOwner,
       decision_owner: normalizedDecisionOwner,
@@ -660,7 +449,52 @@ function prepareTicketCreatePayload(body = {}, { agentFacing = false, actor = nu
   };
 }
 
-function validateAgentTicketAction(ticket, action, actor) {
+function canAssignmentActForExpectedActor(ticket, action, actor, assignment) {
+  if (!ticket || !assignment) return { ok: false, reason: 'missing_context' };
+  if (String(assignment.agent_id || '').trim() !== String(actor || '').trim()) {
+    return { ok: false, reason: 'assignment_actor_mismatch' };
+  }
+
+  const roleKey = getActionMeta(action)?.role_key || null;
+  const expectedActor = resolveRoleActor(ticket, roleKey);
+  if (!expectedActor) {
+    return { ok: false, reason: 'expected_actor_missing' };
+  }
+
+  if (String(expectedActor).trim() === String(actor || '').trim()) {
+    return { ok: true, delegated: false, expected_actor: expectedActor, role_key: roleKey };
+  }
+
+  const expectedParticipant = getParticipantById(expectedActor);
+  const assignmentParticipant = getParticipantById(actor);
+  const expectedIsHuman = expectedParticipant?.participant_type === 'human'
+    || expectedParticipant?.role_type === 'human_principal'
+    || Boolean(expectedParticipant?.capabilities?.includes('role:decision'));
+  const assignmentAllowed = assignmentParticipant?.primary_platform
+    && ticket.platform
+    && assignmentParticipant.primary_platform === ticket.platform;
+
+  if (action === 'resume_from_decision' && expectedIsHuman && assignmentAllowed) {
+    return {
+      ok: true,
+      delegated: true,
+      role_key: roleKey,
+      expected_actor: expectedActor,
+      principal_participant: expectedParticipant || null,
+      assignment_participant: assignmentParticipant || null,
+      delegation_reason: 'human_decision_owner_authorized_agent',
+    };
+  }
+
+  return {
+    ok: false,
+    reason: expectedIsHuman ? 'human_principal_requires_authorized_agent' : 'actor_mismatch',
+    expected_actor: expectedActor,
+    role_key: roleKey,
+  };
+}
+
+function validateAgentTicketAction(ticket, action, actor, options = {}) {
   const enriched = enrichTicketForApi(ticket);
   const availableActions = getAvailableActions(enriched.id);
   if (!availableActions.includes(action)) {
@@ -678,8 +512,19 @@ function validateAgentTicketAction(ticket, action, actor) {
     };
   }
 
-  const expectedActor = resolveRoleActor(enriched, getActionMeta(action)?.role_key || null);
+  const roleKey = getActionMeta(action)?.role_key || null;
+  const expectedActor = resolveRoleActor(enriched, roleKey);
   if (expectedActor && actor !== expectedActor) {
+    const delegated = canAssignmentActForExpectedActor(enriched, action, actor, options.assignment);
+    if (delegated.ok) {
+      return {
+        ok: true,
+        ticket: enriched,
+        availableActions,
+        actor,
+        delegated,
+      };
+    }
     return {
       ok: false,
       status: 403,
@@ -689,7 +534,7 @@ function validateAgentTicketAction(ticket, action, actor) {
         action,
         actor,
         expected_actor: expectedActor,
-        role_key: getActionMeta(action)?.role_key || null,
+        role_key: roleKey,
         ticket_id: enriched.id,
         current_status: enriched.status,
         current_actor: enriched.current_actor || null,
@@ -699,7 +544,7 @@ function validateAgentTicketAction(ticket, action, actor) {
     };
   }
 
-  return { ok: true, ticket: enriched, availableActions };
+  return { ok: true, ticket: enriched, availableActions, actor, delegated: null };
 }
 
 function runAgentTicketAction(req, res, action) {
@@ -709,38 +554,49 @@ function runAgentTicketAction(req, res, action) {
     return sendAgentError(req, res, 404, { error: 'Ticket not found', detail: '工单不存在' });
   }
 
-  const actorCheck = validateAgentFacingActor(req.body?.actor ?? req.body?.agent_id);
+  const assignmentId = String(req.body?.assignment_id ?? '').trim();
+  const token = resolveAssignmentToken(req);
+  const candidateAssignment = assignmentId && token ? store.getAssignmentById(assignmentId) : null;
+  const assignmentMatchesRequest = Boolean(
+    candidateAssignment
+      && candidateAssignment.assignment_token === token
+      && Number(candidateAssignment.ticket_id) === id,
+  );
+
+  const allowedActorIds = assignmentMatchesRequest
+    ? [candidateAssignment.agent_id, candidateAssignment.review_owner, candidateAssignment.agent_label]
+    : [];
+  const actorCheck = validateAgentFacingActor(req.body?.actor ?? req.body?.agent_id, {
+    allowedActorIds,
+  });
   if (!actorCheck.ok) {
     return sendAgentError(req, res, actorCheck.status, actorCheck.body);
   }
   const actor = actorCheck.actor;
 
-  const assignmentId = String(req.body?.assignment_id ?? '').trim();
-  const token = resolveAssignmentToken(req);
   let validatedAssignment = null;
-  if (assignmentId && token) {
-    const assignment = store.getAssignmentById(assignmentId);
-    if (assignment && assignment.assignment_token === token && Number(assignment.ticket_id) === id) {
-      const writeValidation = validateAssignmentWrite({
-        assignment,
-        ticket: enrichTicketForApi(ticket),
-        kind: 'reviewer_action',
-        appendAudit: (audit) => store.appendValidationAudit(audit),
-        latestAssignment: store.findLatestAssignmentForTicket(id, assignment.agent_id),
+  if (assignmentMatchesRequest) {
+    const assignment = candidateAssignment;
+    const writeValidation = validateAssignmentWrite({
+      assignment,
+      ticket: enrichTicketForApi(ticket),
+      kind: 'reviewer_action',
+      payload: { action },
+      appendAudit: (audit) => store.appendValidationAudit(audit),
+      latestAssignment: store.findLatestAssignmentForTicket(id, assignment.agent_id),
+    });
+    if (!writeValidation.ok) {
+      return sendAgentError(req, res, writeValidation.status, {
+        code: writeValidation.code,
+        message: writeValidation.message,
+        validation_audit_id: writeValidation.audit?.id ?? null,
+        machine_readable: writeValidation.machine_readable,
       });
-      if (!writeValidation.ok) {
-        return sendAgentError(req, res, writeValidation.status, {
-          code: writeValidation.code,
-          message: writeValidation.message,
-          validation_audit_id: writeValidation.audit?.id ?? null,
-          machine_readable: writeValidation.machine_readable,
-        });
-      }
-      validatedAssignment = assignment;
     }
+    validatedAssignment = assignment;
   }
 
-  if (['approve', 'reject'].includes(action) && ['done', 'review'].includes(String(ticket.status || '').trim())) {
+  if (['approve', 'reject'].includes(action) && String(ticket.status || '').trim() === 'review') {
     if (!validatedAssignment) {
       return sendAgentError(req, res, 409, {
         error: 'Conflict',
@@ -759,7 +615,9 @@ function runAgentTicketAction(req, res, action) {
     }
   }
 
-  const validation = validateAgentTicketAction(ticket, action, actor);
+  const validation = validateAgentTicketAction(ticket, action, actor, {
+    assignment: validatedAssignment,
+  });
   if (!validation.ok) {
     return sendAgentError(req, res, validation.status, validation.body);
   }
@@ -787,6 +645,17 @@ function runAgentTicketAction(req, res, action) {
     }
     fields.reject_reason = rejectReason;
   }
+  if (action === 'deprecate') {
+    const deprecationReason = normalizeOptionalText(req.body?.deprecation_reason, 4000);
+    if (!deprecationReason) {
+      return sendAgentError(req, res, 400, {
+        error: 'Bad request',
+        detail: 'deprecation_reason 不能为空',
+        required_fields: ['actor', 'deprecation_reason'],
+      });
+    }
+    fields.deprecation_reason = deprecationReason;
+  }
   if (action === 'approve' && req.body?.approve_reviewer !== undefined) {
     fields.approve_reviewer = normalizeOptionalAgent(req.body.approve_reviewer);
   }
@@ -806,6 +675,71 @@ function runAgentTicketAction(req, res, action) {
   }
 
   const updated = store.getTicketById(id);
+
+  if (action === 'reject' && updated?.status === 'queued') {
+    const queueAgent = validatedAssignment?.agent_id || updated.assigned_agent;
+    if (queueAgent) {
+      const latestAssignment = store.findLatestAssignmentForTicket(id, queueAgent);
+      const latestQueuedAssignment = latestAssignment?.stage === 'queued' ? latestAssignment : null;
+      const shouldReuseQueuedAssignment = latestQueuedAssignment
+        && latestQueuedAssignment.assignment_id !== validatedAssignment?.assignment_id
+        && latestQueuedAssignment.assignment_status !== 'submitted';
+
+      if (shouldReuseQueuedAssignment) {
+        const queuedDelivery = resolveDispatchDelivery({ agent: queueAgent, ticketId: id, kind: 'queued' });
+        store.updateAssignment(latestQueuedAssignment.assignment_id, {
+          gateway_id: queuedDelivery.target_gateway_id || latestQueuedAssignment.gateway_id || validatedAssignment?.gateway_id || null,
+          execution_mode: latestQueuedAssignment.execution_mode ?? validatedAssignment?.execution_mode ?? updated.execution_mode,
+          assignment_status: latestQueuedAssignment.assignment_status || 'created',
+          intent: queuedDelivery.delivery_intent || latestQueuedAssignment.intent || 'dispatch',
+          role: latestQueuedAssignment.role || 'execute',
+          stage: 'queued',
+          target_session_key: queuedDelivery.target_session_key || latestQueuedAssignment.target_session_key || validatedAssignment?.target_session_key || null,
+          transport: queuedDelivery.transport || latestQueuedAssignment.transport || validatedAssignment?.transport || null,
+        });
+      } else {
+        const queuedDelivery = resolveDispatchDelivery({ agent: queueAgent, ticketId: id, kind: 'queued' });
+        store.createOrReuseAssignment({
+          ticket_id: id,
+          agent_id: queueAgent,
+          gateway_id: queuedDelivery.target_gateway_id || validatedAssignment?.gateway_id || null,
+          execution_mode: validatedAssignment?.execution_mode ?? updated.execution_mode,
+          assignment_status: 'created',
+          intent: queuedDelivery.delivery_intent || 'dispatch',
+          role: 'execute',
+          stage: 'queued',
+          target_session_key: queuedDelivery.target_session_key || validatedAssignment?.target_session_key || null,
+          transport: queuedDelivery.transport || validatedAssignment?.transport || null,
+        });
+      }
+    }
+  }
+
+  if (validation.delegated?.delegated) {
+    persistTicketComment(id, {
+      id: buildCommentId(),
+      author: actor,
+      timestamp: new Date().toISOString(),
+      content: `代理代办审计：${actor} 已按 assignment 代 ${validation.delegated.expected_actor} 执行 ${action}，工单 ${oldStatus} → ${updated.status}`,
+      type: 'system',
+      visibility: 'internal',
+      thread_id: null,
+      mentions: [],
+      metadata: {
+        source: 'agent_assignment_delegation_audit',
+        action,
+        actor,
+        acted_for: validation.delegated.expected_actor,
+        delegated: true,
+        delegation_reason: validation.delegated.delegation_reason || null,
+        assignment_id: validatedAssignment?.assignment_id || null,
+        assignment_agent: validatedAssignment?.agent_id || null,
+        from_status: oldStatus,
+        to_status: updated.status,
+        role_key: validation.delegated.role_key || null,
+      },
+    }, { preserveAudit: true });
+  }
   if (oldStatus !== updated.status) {
     broadcastTicketStatusChanged(updated, oldStatus, updated.status);
   }
@@ -863,6 +797,49 @@ function formatTicketForList(t) {
     priority: ticket.priority || 'medium',
     progress: getTicketProgress(ticket.status),
     workflow_mismatch: workflow_mismatch || undefined,
+  };
+}
+
+function buildTicketListItem(ticket, dependencySummaryMap = new Map()) {
+  const formatted = formatTicketForList(ticket);
+  const dependencySummary = dependencySummaryMap.get(formatted.id) || { dependency_count: 0, dependent_count: 0 };
+
+  return {
+    id: formatted.id,
+    title: formatted.title,
+    status: formatted.status,
+    priority: formatted.priority,
+    bot: formatted.bot,
+    triage_owner: formatted.triage_owner,
+    review_owner: formatted.review_owner || null,
+    decision_owner: formatted.decision_owner || null,
+    deprecation_reason: formatted.deprecation_reason || null,
+    assigned_agent: formatted.assigned_agent,
+    current_actor: formatted.current_actor,
+    current_actor_source: formatted.current_actor_source,
+    next_actor: formatted.next_actor,
+    next_actor_override: formatted.next_actor_override,
+    next_actor_source: formatted.next_actor_source,
+    manual_override_active: Boolean(formatted.manual_override_active),
+    should_notify: Boolean(formatted.should_notify),
+    session_key: formatted.session_key || null,
+    created: formatted.created || formatted.last_update,
+    last_update: formatted.last_update,
+    progress: formatted.progress,
+    error: formatted.error || null,
+    platform: formatted.platform || null,
+    request_type: formatted.request_type || null,
+    triage_summary: formatted.triage_summary || '',
+    execution_mode: formatted.execution_mode || null,
+    dispatch_state: formatted.dispatch_state || null,
+    awaiting_receipt_from: formatted.awaiting_receipt_from || null,
+    execution_guard: formatted.execution_guard || null,
+    paused_by: formatted.paused_by || null,
+    paused_from_status: formatted.paused_from_status || null,
+    pause_reason: formatted.pause_reason || null,
+    result_summary: formatted.result_summary || null,
+    workflow_mismatch: formatted.workflow_mismatch || undefined,
+    dependency_summary: dependencySummary,
   };
 }
 
@@ -952,39 +929,6 @@ function hasReviewSubmissionForAssignment(assignmentId) {
   return reports.some((report) => String(report?.report_type || '').trim() === 'review_submission');
 }
 
-function buildParentChildSummary(ticket = {}) {
-  const childTickets = Array.isArray(ticket.child_tickets) ? ticket.child_tickets : [];
-  const byStatus = {};
-  const blockingChildren = [];
-
-  childTickets.forEach((child) => {
-    const status = String(child?.status || 'unknown').trim() || 'unknown';
-    byStatus[status] = (byStatus[status] || 0) + 1;
-    if (!['complete', 'failed'].includes(status)) {
-      blockingChildren.push({
-        id: child.id,
-        title: child.title,
-        status: child.status,
-        assigned_agent: child.assigned_agent || null,
-        result_summary: child.result_summary || null,
-        last_update: child.last_update || null,
-      });
-    }
-  });
-
-  return {
-    is_parent: childTickets.length > 0,
-    has_parent: Boolean(ticket.parent_ticket_id),
-    parent_ticket_id: ticket.parent_ticket_id || null,
-    child_count: childTickets.length,
-    terminal_child_count: childTickets.length - blockingChildren.length,
-    open_child_count: blockingChildren.length,
-    all_children_terminal: childTickets.length > 0 ? blockingChildren.length === 0 : true,
-    by_status: byStatus,
-    blocking_children: blockingChildren,
-  };
-}
-
 function buildWorkboardRelationSummary(ticket = {}, dependencyCount = 0) {
   const relations = Array.isArray(ticket.ticket_relations) ? ticket.ticket_relations : [];
   const supplementalTickets = Array.isArray(ticket.supplemental_tickets) ? ticket.supplemental_tickets : [];
@@ -1032,6 +976,9 @@ function buildWorkboardItem(ticket = {}, dependencyCount = 0) {
 }
 
 function matchesStockWorkboardFilters(item, query = {}) {
+  const platform = normalizeOptionalText(query.platform, 120);
+  if (platform && platform !== 'stock-platform') return false;
+
   const statusFilters = parseCsvParam(query.status);
   if (statusFilters.length > 0 && !statusFilters.includes(item.status)) return false;
 
@@ -1261,123 +1208,95 @@ function appendTransitionAuditComment(ticketId, options = {}) {
   return persistTicketComment(ticketId, comment, { preserveAudit: true });
 }
 
-function buildDispatchHandshakeProjection(ticket = {}) {
-  const actor = String(ticket.current_actor || ticket.next_actor || '').trim();
-  const watchers = Array.from(new Set([
-    ticket.assigned_agent,
-    ticket.review_owner,
-    ticket.triage_owner,
-    ticket.current_actor,
-  ].map((value) => String(value || '').trim()).filter(Boolean)));
+function ensureRunningAssignmentAfterAutoStart(ticketBefore, ticketAfter, latestHandshake) {
+  if (!ticketBefore || !ticketAfter) return null;
+  if (ticketBefore.status !== 'queued' || ticketAfter.status !== 'running') return null;
 
-  if (!ticket.id || !ticket.status || !actor) {
-    return {
-      dispatch_state: null,
-      awaiting_receipt_from: null,
-      dispatch_ack_deadline_at: null,
-      dispatch_retry_count: 0,
-      next_dispatch_retry_at: null,
-      last_dispatch_receipt_at: null,
-      last_dispatch_receipt_decision: null,
-      dispatch_timeout_reason: null,
-      dispatch_watchers: watchers,
-      dispatch_escalation_targets: watchers,
-    };
+  const agent = ticketAfter.assigned_agent || ticketAfter.current_actor || ticketAfter.next_actor;
+  if (!agent) return null;
+
+  const latestAssignment = store.findLatestAssignmentForTicket(ticketAfter.id, agent);
+  if (latestAssignment && latestAssignment.stage === 'running') {
+    if (!latestAssignment.dispatch_event_id) {
+      const runningDispatchId = dispatch.recordDispatchEvent(ticketAfter.id, agent, 'running');
+      const refreshed = store.updateAssignment(latestAssignment.assignment_id, {
+        dispatch_event_id: runningDispatchId,
+        gateway_id: runningDelivery.target_gateway_id || latestAssignment.gateway_id || null,
+        assignment_status: latestAssignment.assignment_status || 'created',
+        intent: runningDelivery.delivery_intent || latestAssignment.intent || 'dispatch',
+        role: latestAssignment.role || 'execute',
+        stage: 'running',
+        target_session_key: runningDelivery.target_session_key
+          || latestAssignment.target_session_key
+          || latestHandshake?.receipt_payload?.target_session_key
+          || null,
+        transport: runningDelivery.transport || latestAssignment.transport || null,
+      });
+      store.updateExecutionReservation(ticketAfter.id, {
+        assignment_id: refreshed.assignment_id,
+        dispatch_event_id: runningDispatchId,
+        state: 'reserved',
+        holder_kind: 'assignment',
+        holder_key: refreshed.assignment_id,
+        release_reason: null,
+        released_at: null,
+      });
+      dispatch.emitAssignmentDeliveryRequested(refreshed.assignment_id, ticketAfter.id, runningDispatchId, {
+        target_gateway_id: refreshed.gateway_id,
+        transport: refreshed.transport,
+        target_session_key: refreshed.target_session_key,
+      });
+      return refreshed;
+    }
+
+    store.updateExecutionReservation(ticketAfter.id, {
+      assignment_id: latestAssignment.assignment_id,
+      dispatch_event_id: latestAssignment.dispatch_event_id,
+      state: 'reserved',
+      holder_kind: 'assignment',
+      holder_key: latestAssignment.assignment_id,
+      release_reason: null,
+      released_at: null,
+    });
+    return latestAssignment;
   }
 
-  const latest = dispatch.getLatestDispatchHandshakeState(ticket.id, actor, ticket.status);
-  return {
-    dispatch_state: latest?.dispatch_state || null,
-    awaiting_receipt_from: latest?.awaiting_receipt_from || null,
-    dispatch_ack_deadline_at: latest?.dispatch_ack_deadline_at || null,
-    dispatch_retry_count: Number(latest?.dispatch_retry_count ?? 0),
-    next_dispatch_retry_at: latest?.next_dispatch_retry_at || null,
-    last_dispatch_receipt_at: latest?.receipt_received_at || null,
-    last_dispatch_receipt_decision: latest?.receipt_decision || null,
-    dispatch_timeout_reason: latest?.dispatch_state === 'receipt_overdue' ? 'receipt_not_received_before_deadline' : null,
-    dispatch_watchers: watchers,
-    dispatch_escalation_targets: watchers,
-  };
-}
+  const runningDispatchId = dispatch.recordDispatchEvent(ticketAfter.id, agent, 'running');
+  const runningDelivery = resolveDispatchDelivery({ agent, ticketId: ticketAfter.id, kind: 'running' });
+  const successor = store.createOrReuseAssignment({
+    ticket_id: ticketAfter.id,
+    dispatch_event_id: runningDispatchId,
+    agent_id: agent,
+    gateway_id: runningDelivery.target_gateway_id || latestAssignment?.gateway_id || null,
+    execution_mode: latestAssignment?.execution_mode ?? ticketAfter.execution_mode,
+    assignment_status: 'created',
+    intent: runningDelivery.delivery_intent || latestAssignment?.intent || 'dispatch',
+    role: latestAssignment?.role || 'execute',
+    stage: 'running',
+    target_session_key: runningDelivery.target_session_key
+      || latestAssignment?.target_session_key
+      || latestHandshake?.receipt_payload?.target_session_key
+      || null,
+    transport: runningDelivery.transport || latestAssignment?.transport || null,
+  });
 
-function buildExecutionGuard(ticket = {}) {
-  const workerEvidence = getExecutionWorkerEvidence(ticket);
-  const reservation = ticket.id ? store.getExecutionReservationForTicket(ticket.id) : null;
-  const reservationConflict = ticket.assigned_agent
-    ? store.findExecutionReservationConflict({ agentId: ticket.assigned_agent, excludeTicketId: ticket.id })
-    : null;
-  const guard = {
-    ...workerEvidence,
-    max_active_workers: Number(ticket.max_active_workers ?? 0),
-    requires_worker: executionModeRequiresWorker(ticket.execution_mode),
-    suppress_dispatch: false,
-    reason: null,
-    reservation,
-    reservation_conflict: reservationConflict,
-  };
+  store.updateExecutionReservation(ticketAfter.id, {
+    assignment_id: successor.assignment_id,
+    dispatch_event_id: runningDispatchId,
+    state: 'reserved',
+    holder_kind: 'assignment',
+    holder_key: successor.assignment_id,
+    release_reason: null,
+    released_at: null,
+  });
 
-  const latestHandshake = buildDispatchHandshakeProjection(ticket);
-  const hasAcceptedQueuedReceipt = ticket.status === 'queued'
-    && latestHandshake.dispatch_state === 'receipt_accepted'
-    && latestHandshake.last_dispatch_receipt_decision === 'accepted';
+  dispatch.emitAssignmentDeliveryRequested(successor.assignment_id, ticketAfter.id, runningDispatchId, {
+    target_gateway_id: successor.gateway_id,
+    transport: successor.transport,
+    target_session_key: successor.target_session_key,
+  });
 
-  if (reservationConflict && ticket.status === 'queued') {
-    return {
-      ...guard,
-      suppress_dispatch: true,
-      reason: 'reservation_conflict',
-    };
-  }
-
-  if (workerEvidence.active_workers <= 0) return guard;
-
-  if (hasAcceptedQueuedReceipt) {
-    return {
-      ...guard,
-      suppress_dispatch: false,
-      reason: 'receipt_accepted_pending_running',
-    };
-  }
-
-  if (ticket.status === 'running') {
-    return {
-      ...guard,
-      suppress_dispatch: false,
-      reason: 'running_assignment_refresh',
-    };
-  }
-
-  if ((ticket.execution_mode || 'direct') === 'direct') {
-    return {
-      ...guard,
-      suppress_dispatch: true,
-      reason: 'direct_active_worker',
-    };
-  }
-
-  return {
-    ...guard,
-    suppress_dispatch: true,
-    reason: 'active_worker_in_progress',
-  };
-}
-
-function enrichTicketForApi(ticket = {}) {
-  const enriched = enrichTicketRouting(ticket);
-  const executionGuard = buildExecutionGuard(enriched);
-  const dispatchHandshake = buildDispatchHandshakeProjection(enriched);
-  const withGuards = {
-    ...enriched,
-    ...dispatchHandshake,
-    should_notify: executionGuard.suppress_dispatch ? false : enriched.should_notify,
-    execution_guard: executionGuard,
-  };
-  const parent_child_summary = buildParentChildSummary(withGuards);
-  return {
-    ...withGuards,
-    parent_child_summary,
-    advance_chain: validateDispatchAdvanceChain(withGuards),
-  };
+  return successor;
 }
 
 function maybeAutoStartQueuedTicketAfterWorkerChange(ticketId, worker = {}) {
@@ -1398,7 +1317,7 @@ function maybeAutoStartQueuedTicketAfterWorkerChange(ticketId, worker = {}) {
 
   const workerStatus = String(worker?.status || '').trim().toLowerCase();
   const hasFreshActiveWorker = ['starting', 'running'].includes(workerStatus)
-    || ticket.execution_guard?.has_worker_evidence;
+    || ticket.execution_guard?.has_active_execution_evidence;
 
   if (hasFreshActiveWorker) {
     store.updateExecutionReservation(ticket.id, {
@@ -1420,6 +1339,11 @@ function maybeAutoStartQueuedTicketAfterWorkerChange(ticketId, worker = {}) {
 
   if (!started?.success && started?.error !== 'AGENT_ACTION_NOT_ALLOWED') {
     console.warn(`[workers] auto start queued ticket #${ticket.id} skipped: ${started?.error || 'unknown error'}`);
+  }
+
+  const ticketAfter = store.getTicketById(ticketId);
+  if (started?.success) {
+    ensureRunningAssignmentAfterAutoStart(ticket, ticketAfter, latestHandshake);
   }
 
   return store.getTicketById(ticketId);
@@ -1691,63 +1615,6 @@ function loadStockAdminTicket(req, res, capability = 'stock_tickets:read') {
   return { grant, ticket: enriched };
 }
 
-function buildStageAdvanceGuidance(ticket = {}) {
-  const stage = String(ticket?.status || '').trim();
-  const sharedPrefix = '重要：先按 hosted contract 回一条 dispatch_receipt（通过 report API，不要直接写 comment/transition）；receipt 不是终点，你的目标是把【当前阶段】推进到【下一阶段】。';
-  const sharedMemory = '完成当前阶段前，请先把关键进展/决策/结论写入你自己工作区的 memory/YYYY-MM-DD.md（必要时更新相关长期记忆），后续继续用 heartbeat / reports 让平台代写状态推进。';
-  const stageMap = {
-    triage: '当前阶段=triage：请补齐结构化分诊结论与责任链，优先推进到 queued；若责任链仍不完整或范围未定，可继续停在 triage 并用 triage_structured_report 明确缺口，必要时用 decision_request 请求拍板。',
-    queued: '当前阶段=queued：receipt 后要尽快进入实际执行；direct 模式就继续实现并用 execution_completed / blocked_report / decision_request 等把 queued 推进到 done / blocked / pending_decision。subagent/acp 模式先登记真实 worker，再继续推进。',
-    running: '当前阶段=running：继续实现、验证并收口；优先推进到 done（execution_completed / review_submission），若受阻则推进到 blocked / pending_decision / failed，必要时也可 pause，但不能只停在 running。',
-    done: '当前阶段=done：这是 reviewer 接单前态；reviewer receipt 后应推进到 review，并在完成验收后先提交 review_submission，再决定 approve（推进到 complete）或 reject（打回 queued）。',
-    review: '当前阶段=review：reviewer 已正式接单；下一步必须给出验收结论。先提交 review_submission 写清依据，再 approve（complete）或 reject（queued）；若缺上下文可 pause / decision_request，但不能只停在 receipt。',
-    blocked: '当前阶段=blocked：目标是解除阻塞并恢复推进；若阻塞已解除，推动回 queued/继续执行；若仍无法继续，至少用 heartbeat / decision_request 明确阻塞来源、所需外部动作与下一步。',
-    paused: '当前阶段=paused：目标是恢复到挂起前状态并继续推进；若恢复条件已满足就 resume，若仍不满足则通过 heartbeat / decision_request 说明为什么继续保持 paused。',
-    pending_decision: '当前阶段=pending_decision：目标是把待拍板问题讲清楚并等决策收口；请用 decision_request 明确可选方案、风险和建议，决策落定后再恢复推进，不要让 ticket 长期停在无结论状态。',
-  };
-  const fallback = '请先确认当前 stage 的 allowed actions / report contract，并选择一个明确的下一阶段或收口动作推进，不要只完成 receipt。';
-  return [sharedPrefix, stageMap[stage] || fallback, sharedMemory].join(' ');
-}
-
-function buildAgentDispatchMessage({ ticket, agent, assignment }) {
-  const apiBaseUrl = assignment ? getAgentApiBaseUrl({ gatewayId: assignment.gateway_id }) : null;
-  const stageGuidance = buildStageAdvanceGuidance(ticket);
-  const base = [
-    `🔔 你有 1 个当前阶段待处理工单`,
-    '',
-    `#${ticket.id} ${ticket.title}`,
-    `状态：${ticket.status}`,
-    `当前责任人：${agent}`,
-    '',
-    `请立即使用 ticket-handler skill 处理，并把【当前阶段】自行闭环推进到【下一阶段】。`,
-    '',
-    stageGuidance,
-    ...(String(ticket.execution_mode || '').trim() && ['subagent', 'acp'].includes(String(ticket.execution_mode || '').trim()) ? ['', '重要：若本单目标是实现 / 修复 / 回归闭环，不允许只派一次性 analysis 子代理；必须用 Loop skill（或等价迭代控制）持续驱动子代理，多次尝试直到达到当前阶段走单标准、显式达到迭代上限，或确认需要人工决策。'] : []),
-    '',
-    `不要等老大再追问。若遇到需要老大决策的关键问题，先写工单评论，再主动通知老大。`,
-  ];
-
-  if (!assignment) return base.join('\n');
-
-  base.push(
-    '',
-    '【Agent-Facing Assignment Contract】',
-    `assignment_id: ${assignment.assignment_id}`,
-    `assignment_token: ${assignment.assignment_token}`,
-    `api_base_url: ${apiBaseUrl || 'UNCONFIGURED_REMOTE_API_BASE_URL'}`,
-    `read: GET ${AGENT_API_PREFIX}/assignments/${assignment.assignment_id}`,
-    `skill fetch: GET ${AGENT_API_PREFIX}/skills/current`,
-    `playbook: GET ${AGENT_API_PREFIX}/playbooks/${AGENT_PLAYBOOK_KEY}`,
-    `heartbeat: POST ${AGENT_API_PREFIX}/assignments/${assignment.assignment_id}/heartbeat`,
-    `report: POST ${AGENT_API_PREFIX}/assignments/${assignment.assignment_id}/reports`,
-    `legacy aliases: ${AGENT_API_LEGACY_PREFIX}/...`,
-    '说明：agent 优先走 runtime/assignment/skill fetch/report API；assignment_token 优先放 X-Assignment-Token，body/query 仅保留兼容。不要直接写 ticket comment/transition。',
-    ...(apiBaseUrl ? [] : ['注意：当前远端 agent-facing HTTP 地址尚未配置，请在平台侧设置 TICKET_AGENT_API_BASE_URL 后再让远端 agent 直接调 API。']),
-  );
-
-  return base.join('\n');
-}
-
 // GET /api/version - 运行态版本表面：git commit / build time / schema version / bundle version（live acceptance 与 reviewer 先核此契约）
 app.get('/api/version', (_req, res) => {
   res.json({ data: getRuntimeVersion() });
@@ -1769,188 +1636,160 @@ function computeDashboardMetrics() {
   const tickets = store.getAllTickets().map((ticket) => enrichTicketForApi(ticket));
   return buildDashboardMetrics(tickets);
 }
+function computeSlaRemainingMs(ticket = {}, now = Date.now()) {
+  const statusMeta = getStatusMeta(ticket.status);
+  const defaultMinutes = Number(statusMeta?.sla?.default_minutes);
+  if (!Number.isFinite(defaultMinutes) || defaultMinutes <= 0) return null;
+
+  const baselineTs = Date.parse(ticket.last_update || ticket.created || '');
+  if (!Number.isFinite(baselineTs)) return null;
+  return baselineTs + defaultMinutes * 60 * 1000 - now;
+}
+
+function inferInboxLane(ticket = {}) {
+  if (ticket.status === 'triage') return 'triage';
+  if (ticket.status === 'queued' || ticket.status === 'running') return 'execution';
+  if (ticket.status === 'pending_decision') return 'decision';
+  if (ticket.status === 'done' || ticket.status === 'review') return 'review';
+  return null;
+}
+
+function inferInboxReason(ticket = {}, lane) {
+  const available = Array.isArray(ticket.available_actions) ? ticket.available_actions : [];
+  switch (lane) {
+    case 'triage':
+      return ticket.triage_summary || '等待 triage owner 完成范围收敛并决定是否入队';
+    case 'execution':
+      if (ticket.dispatch_state === 'awaiting_receipt') {
+        return `等待 ${ticket.awaiting_receipt_from || ticket.current_actor || ticket.assigned_agent || '执行人'} 回执；receipt accepted 后继续推进执行`;
+      }
+      if (ticket.status === 'running') {
+        return '当前由执行人处理中，等待实现完成后提交验收或请求决策';
+      }
+      if (available.includes('start_work')) {
+        return '已进入执行队列，责任链已落到执行人，下一步应 start_work 开工';
+      }
+      return '已进入执行队列，等待执行侧补齐前置条件后继续推进';
+    case 'review':
+      if (ticket.dispatch_state === 'awaiting_receipt') {
+        return `等待 ${ticket.awaiting_receipt_from || ticket.review_owner || ticket.current_actor || 'reviewer'} 回执并进入 review`; 
+      }
+      if (ticket.status === 'done') {
+        return ticket.result_summary || '实现已完成，等待 reviewer 开始验收';
+      }
+      if (available.includes('approve') || available.includes('reject')) {
+        return ticket.result_summary || 'review 已开始，等待 reviewer approve / reject 或请求决策';
+      }
+      return ticket.result_summary || '等待 reviewer 收口';
+    case 'decision':
+      if (available.includes('resume_from_decision')) {
+        return ticket.decision_summary || ticket.triage_summary || '等待 decision owner 拍板，决策后可恢复执行';
+      }
+      return ticket.decision_summary || ticket.triage_summary || '等待 decision owner 拍板';
+    default:
+      return ticket.triage_summary || ticket.result_summary || null;
+  }
+}
+
+function inferRecommendedAction(ticket = {}, lane) {
+  const available = Array.isArray(ticket.available_actions) ? ticket.available_actions : [];
+  const preferredByLane = {
+    triage: ['queue', 'deprecate', 'pause'],
+    execution: ticket.status === 'queued'
+      ? ['start_work', 'request_decision', 'block', 'pause', 'fail', 'submit_for_review']
+      : ['submit_for_review', 'request_decision', 'block', 'pause', 'fail', 'start_work'],
+    review: ticket.status === 'done'
+      ? ['start_review', 'approve', 'reject', 'request_decision', 'pause']
+      : ['approve', 'reject', 'request_decision', 'pause', 'start_review'],
+    decision: ['resume_from_decision', 'approve', 'pause'],
+  };
+  const preferred = preferredByLane[lane] || [];
+  const selected = preferred.find((action) => available.includes(action)) || available[0] || null;
+  return selected;
+}
+
+function buildInboxList(statuses = []) {
+  const now = Date.now();
+  const dependencySummaryMap = store.getDependencySummaryMap();
+
+  return store.getAllTickets()
+    .map((ticket) => ({
+      ...buildTicketListItem(ticket, dependencySummaryMap),
+      available_actions: getAvailableActions(ticket.id),
+    }))
+    .filter((ticket) => statuses.includes(ticket.status))
+    .map((ticket) => {
+      const inbox_lane = inferInboxLane(ticket);
+      const sla_remaining_ms = computeSlaRemainingMs(ticket, now);
+      return {
+        ...ticket,
+        inbox_lane,
+        inbox_reason: inferInboxReason(ticket, inbox_lane),
+        recommended_action: inferRecommendedAction(ticket, inbox_lane),
+        owner_label: ticket.current_actor || ticket.next_actor || ticket.assigned_agent || ticket.triage_owner || ticket.review_owner || ticket.decision_owner || null,
+        sla_remaining_ms,
+        sla_remaining_minutes: sla_remaining_ms == null ? null : Math.round(sla_remaining_ms / 60000),
+      };
+    })
+    .sort((a, b) => {
+      const aSla = a.sla_remaining_ms;
+      const bSla = b.sla_remaining_ms;
+      if (aSla != null && bSla != null && aSla !== bSla) return aSla - bSla;
+      if (aSla != null && bSla == null) return -1;
+      if (aSla == null && bSla != null) return 1;
+
+      const aTs = Date.parse(a.last_update || a.created || '') || 0;
+      const bTs = Date.parse(b.last_update || b.created || '') || 0;
+      if (aTs !== bTs) return aTs - bTs;
+      return (Number(a.id) || 0) - (Number(b.id) || 0);
+    });
+}
+
+function buildInboxPayload() {
+  const lanes = {
+    triage: buildInboxList(['triage']),
+    execution: buildInboxList(['queued', 'running']),
+    review: buildInboxList(['done', 'review']),
+    decision: buildInboxList(['pending_decision']),
+  };
+
+  return {
+    items: Object.values(lanes).flat(),
+    lanes,
+    counts: Object.fromEntries(Object.entries(lanes).map(([key, value]) => [key, value.length])),
+  };
+}
 
 app.get('/api/metrics/dashboard', (_req, res) => {
   res.json({ data: computeDashboardMetrics() });
 });
 
-// GET /api/tickets
-app.get('/api/tickets', (req, res) => {
-  const tickets = store.getAllTickets()
-    .map(formatTicketForList)
-    .filter((ticket) => matchesTicketFilters(ticket, req.query))
-    .sort((a, b) => {
-      const aTs = Date.parse(a.created || '') || 0;
-      const bTs = Date.parse(b.created || '') || 0;
-      if (bTs !== aTs) return bTs - aTs;
-      return (Number(b.id) || 0) - (Number(a.id) || 0);
-    });
-  res.json(tickets);
+app.get('/api/inbox', (_req, res) => {
+  res.json(buildInboxPayload());
 });
 
-// GET /api/notifications/summary?minutes=60
-app.get('/api/notifications/summary', (req, res) => {
-  const minutes = Math.max(1, parseInt(req.query.minutes || '60', 10) || 60);
-  const now = Date.now();
-  const fromTs = now - minutes * 60 * 1000;
-
-  const all = store.getAllTickets();
-  const recent = all.filter((t) => {
-    const ts = Date.parse(t.last_update || t.created || '');
-    if (!Number.isFinite(ts)) return false;
-    return ts >= fromTs;
-  }).map((t) => enrichTicketForApi(t));
-
-  const byStatus = {
-    done: recent.filter((t) => t.status === 'done'),
-    complete: recent.filter((t) => t.status === 'complete'),
-    failed: recent.filter((t) => t.status === 'failed'),
-    pending_decision: recent.filter((t) => t.status === 'pending_decision'),
-  };
-
-  const normalize = (t) => ({
-    id: t.id,
-    title: t.title,
-    status: t.status,
-    triage_owner: t.triage_owner,
-    review_owner: t.review_owner || null,
-    decision_owner: t.decision_owner || null,
-    assigned_agent: t.assigned_agent,
-    next_actor: t.next_actor,
-    next_actor_source: t.next_actor_source,
-    last_update: t.last_update,
-    result_summary: t.result_summary || null,
-    error: t.error || null,
-    decision_summary: t.decision_summary || null,
-  });
-
-  res.json({
-    windowMinutes: minutes,
-    generatedAt: new Date(now).toISOString(),
-    counts: {
-      done: byStatus.done.length,
-      complete: byStatus.complete.length,
-      failed: byStatus.failed.length,
-      pending_decision: byStatus.pending_decision.length,
-      total: byStatus.done.length + byStatus.complete.length + byStatus.failed.length + byStatus.pending_decision.length,
-    },
-    items: {
-      done: byStatus.done.map(normalize),
-      complete: byStatus.complete.map(normalize),
-      failed: byStatus.failed.map(normalize),
-      pending_decision: byStatus.pending_decision.map(normalize),
-    },
-  });
+app.get('/api/inbox/triage', (_req, res) => {
+  res.json({ items: buildInboxList(['triage']) });
 });
 
-// GET /api/tickets/pull - Agent 拉取待处理工单（必须在 /api/tickets/:id 之前）
-app.get('/api/tickets/pull', (req, res) => {
-  const { agent, limit = 1 } = req.query;
-  if (!agent) {
-    return res.status(400).json({ error: 'Bad request', message: 'agent 参数必填' });
-  }
-  const tickets = store.getAllTickets()
-    .map((t) => formatTicketForList(t))
-    .filter((t) => t.status === 'queued' && t.assigned_agent === agent && !t.execution_guard?.suppress_dispatch)
-    .sort((a, b) => {
-      const priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
-      return (priorityOrder[a.priority] || 2) - (priorityOrder[b.priority] || 2);
-    })
-    .slice(0, parseInt(limit, 10) || 1);
-  res.json(tickets);
+app.get('/api/inbox/execution', (_req, res) => {
+  res.json({ items: buildInboxList(['queued', 'running']) });
 });
 
-// GET /api/tickets/:id/status - 必须在 /api/tickets/:id 之前
-app.get('/api/tickets/:id/status', (req, res) => {
-  const id = req.params.id;
-  const ticket = store.getTicketById(id);
-  if (!ticket) {
-    return res.status(404).json({ error: 'Ticket not found', message: '工单不存在' });
-  }
-  const enriched = enrichTicketForApi(ticket);
-  res.json({
-    status: enriched.status,
-    session_key: enriched.session_key,
-    result_summary: enriched.result_summary,
-    last_update: enriched.last_update,
-    run_id: enriched.run_id,
-    triage_owner: enriched.triage_owner,
-    assigned_agent: enriched.assigned_agent,
-    current_actor: enriched.current_actor,
-    current_actor_source: enriched.current_actor_source,
-    next_actor: enriched.next_actor,
-    next_actor_override: enriched.next_actor_override,
-    next_actor_source: enriched.next_actor_source,
-    should_notify: enriched.should_notify,
-    execution_mode: enriched.execution_mode,
-    execution_mode_source: enriched.execution_mode_source,
-    execution_rule_key: enriched.execution_rule_key,
-    max_active_workers: enriched.max_active_workers,
-    worker_stats: enriched.worker_stats,
-    execution_guard: enriched.execution_guard,
-    error: enriched.error,
-  });
+app.get('/api/inbox/review', (_req, res) => {
+  res.json({ items: buildInboxList(['done', 'review']) });
 });
 
-// GET /api/tickets/:id
-app.get('/api/tickets/:id', (req, res) => {
-  const id = req.params.id;
-  const ticket = store.getTicketById(id);
-  if (!ticket) {
-    return res.status(404).json({ error: 'Ticket not found', message: '工单不存在' });
-  }
-  const enriched = enrichTicketForApi(ticket);
-  const workflow_mismatch = detectWorkflowMismatch(enriched);
-  const detail = {
-    ...enriched,
-    updated: enriched.updated || enriched.last_update,
-    assignee: enriched.assigned_agent || null,
-    reporter: null,
-    tags: [],
-    attachments: [],
-    watchers: enriched.watchers || [],
-    comments: (enriched.comments || []).map(normalizeComment),
-    workflow_mismatch: workflow_mismatch || undefined,
-    execution_workers: enriched.execution_workers || [],
-  };
-  res.json(detail);
+app.get('/api/inbox/decisions', (_req, res) => {
+  res.json({ items: buildInboxList(['pending_decision']) });
 });
 
-// GET /api/tickets/:id/comments?type=blocker&visibility=internal&thread_id=xxx
-app.get('/api/tickets/:id/comments', (req, res) => {
-  const id = req.params.id;
-  const ticket = store.getTicketById(id);
-  if (!ticket) {
-    return res.status(404).json({ error: 'Ticket not found', message: '工单不存在' });
-  }
-
-  const { type, visibility, thread_id } = req.query;
-  if (type && !COMMENT_TYPES.includes(type)) {
-    return res.status(400).json({ error: 'Bad request', message: 'type 非法' });
-  }
-  if (visibility && !COMMENT_VISIBILITY.includes(visibility)) {
-    return res.status(400).json({ error: 'Bad request', message: 'visibility 非法' });
-  }
-  if (thread_id && String(thread_id).length > THREAD_ID_MAX_LENGTH) {
-    return res.status(400).json({ error: 'Bad request', message: 'thread_id 过长' });
-  }
-
-  let comments = (ticket.comments || []).map(normalizeComment);
-
-  if (type) comments = comments.filter((c) => c.type === type);
-  if (visibility) comments = comments.filter((c) => c.visibility === visibility);
-  if (thread_id) comments = comments.filter((c) => String(c.thread_id || '') === String(thread_id));
-
-  res.json({
-    ticket_id: Number(id),
-    filters: {
-      type: type || null,
-      visibility: visibility || null,
-      thread_id: thread_id || null,
-    },
-    total: comments.length,
-    comments,
-  });
+registerTicketReadRoutes(app, {
+  buildTicketListItem,
+  matchesTicketFilters,
+  formatTicketForList,
+  normalizeComment,
+  getAvailableActions,
 });
 
 // POST /api/tickets - 创建工单，立即返回；未传 status 时默认 triage（triage -> queue 须经 transition 且责任链已落链）
@@ -2130,6 +1969,71 @@ app.post('/api/tickets/:id/dispatch', (req, res) => {
   res.json(formatTicketForList(updated));
 });
 
+// POST /api/tickets/:id/nudge - 手动催当前处理人（通过 dispatch nudge 通道发送消息，不改状态）
+app.post('/api/tickets/:id/nudge', (req, res) => {
+  const id = Number(req.params.id);
+  const rawTicket = store.getTicketById(id);
+  if (!rawTicket) {
+    return res.status(404).json({ error: 'Ticket not found', message: '工单不存在' });
+  }
+
+  const ticket = enrichTicketForApi(rawTicket);
+  if (['complete', 'failed', 'deprecated'].includes(ticket.status)) {
+    return res.status(409).json({
+      error: 'Action not allowed',
+      message: `状态 ${ticket.status} 不支持催单`,
+      ticket: formatTicketForList(rawTicket),
+    });
+  }
+
+  const agent = normalizeOptionalAgent(ticket.current_actor || ticket.next_actor || ticket.assigned_agent);
+  if (!agent) {
+    return res.status(409).json({
+      error: 'Action not allowed',
+      message: '当前责任人未解析，无法发送催单消息',
+      ticket: formatTicketForList(rawTicket),
+    });
+  }
+
+  let dispatchId = dispatch.getUnackedDispatchEvent(ticket.id, agent, MANUAL_NUDGE_STATUS_KEY);
+  const reused = Boolean(dispatchId);
+
+  if (!dispatchId && dispatch.hasRecentDispatch(ticket.id, agent, MANUAL_NUDGE_STATUS_KEY, TICKET_NUDGE_THROTTLE_MINUTES)) {
+    const latest = dispatch.getLatestDispatchEvent(ticket.id, agent, MANUAL_NUDGE_STATUS_KEY);
+    return res.status(409).json({
+      error: 'Nudge throttled',
+      message: `最近 ${TICKET_NUDGE_THROTTLE_MINUTES} 分钟内已催过 ${agent}，请稍后再试`,
+      agent,
+      dispatch_id: latest?.id || null,
+      last_dispatch_at: latest?.created_at || null,
+      ticket: formatTicketForList(rawTicket),
+    });
+  }
+
+  if (!dispatchId) {
+    dispatchId = dispatch.recordDispatchEvent(ticket.id, agent, MANUAL_NUDGE_STATUS_KEY);
+  }
+
+  const readyItem = buildNudgeReadyItem({
+    ticket,
+    agent,
+    dispatchId,
+    delivery: resolveDispatchDelivery({ agent, ticketId: ticket.id, kind: 'nudge', nudgeSource: 'manual' }),
+    message: buildManualNudgeMessage({ ticket, agent }),
+    nudgeKey: MANUAL_NUDGE_STATUS_KEY,
+    nudgeSource: 'manual',
+    nudgeLevel: 'L1',
+  });
+
+  return res.status(reused ? 200 : 201).json({
+    success: true,
+    reused,
+    dispatch_id: dispatchId,
+    ticket: formatTicketForList(rawTicket),
+    ready_item: readyItem,
+  });
+});
+
 // POST /api/tickets/:id/comments
 app.post('/api/tickets/:id/comments', (req, res) => {
   const id = req.params.id;
@@ -2201,7 +2105,7 @@ app.get('/api/tickets/:id/workers', (req, res) => {
     max_active_workers: enriched.max_active_workers,
     worker_stats: enriched.worker_stats,
     execution_guard: enriched.execution_guard,
-    workers: store.listExecutionWorkers(id),
+    workers: enriched.execution_workers,
   });
 });
 
@@ -2310,34 +2214,39 @@ app.post('/api/tickets/batch-delete', (req, res) => {
 // ?source=legacy|projection|compare  (default: legacy)
 app.get('/api/dispatch/ready', (req, res) => {
   const source = (req.query.source || 'legacy').toLowerCase();
+  const requestId = getRequestId(req, res);
   if (source === 'projection') {
+    const terminalStatuses = new Set(['complete', 'failed', 'deprecated']);
     const projectionRows = store.getDispatchReadyProjection();
-    const ready = projectionRows.map((r) => {
-      const ticket = enrichTicketForApi(store.getTicketById(r.ticket_id) || {});
-      return {
-        dispatch_id: r.dispatch_id,
-        agent: r.agent,
-        ticket_id: r.ticket_id,
-        title: ticket.title ?? '',
-        status: ticket.status ?? '',
-        next_actor: ticket.next_actor ?? r.agent,
-        execution_mode: ticket.execution_mode ?? null,
-        worker_stats: ticket.worker_stats ?? {},
-        reason: r.reason,
-        dedupe_key: r.dedupe_key,
-        escalation_tier: r.escalation_tier,
-        assignment_id: r.assignment_id,
-        assignment: r.assignment ?? null,
-        reset_session: r.reset_session,
-        session_reset_reason: r.session_reset_reason,
-        target_session_key: r.target_session_key,
-        target_gateway_id: r.target_gateway_id,
-        message: r.message ?? null,
-        kind: r.kind ?? null,
-        workflow_mismatch: r.workflow_mismatch ?? null,
-      };
-    });
-    return res.json({ ready, _source: 'projection' });
+    const ready = projectionRows
+      .map((r) => {
+        const ticket = enrichTicketForApi(store.getTicketById(r.ticket_id) || {});
+        return {
+          dispatch_id: r.dispatch_id,
+          dispatch_event_id: r.dispatch_id,
+          agent: r.agent,
+          ticket_id: r.ticket_id,
+          title: ticket.title ?? '',
+          status: ticket.status ?? '',
+          next_actor: ticket.next_actor ?? r.agent,
+          execution_mode: ticket.execution_mode ?? null,
+          worker_stats: ticket.worker_stats ?? {},
+          reason: r.reason,
+          dedupe_key: r.dedupe_key,
+          escalation_tier: r.escalation_tier,
+          assignment_id: r.assignment_id,
+          assignment: r.assignment ?? null,
+          reset_session: r.reset_session,
+          session_reset_reason: r.session_reset_reason,
+          target_session_key: r.target_session_key,
+          target_gateway_id: r.target_gateway_id,
+          message: r.message ?? null,
+          kind: r.kind ?? null,
+          workflow_mismatch: r.workflow_mismatch ?? null,
+        };
+      })
+      .filter((item) => !terminalStatuses.has(item.status));
+    return res.json({ ready, request_id: requestId, _source: 'projection' });
   }
 
   const rawTickets = store.getAllTickets();
@@ -2353,214 +2262,30 @@ app.get('/api/dispatch/ready', (req, res) => {
     }
   }
   const allTickets = rawTickets.map(enrichTicketForApi);
-  const ticketById = new Map(allTickets.map((ticket) => [ticket.id, ticket]));
-
-  // 构建候选：正常单 (next_actor) + mismatch 单 (alert_target) + 平台催办 nudge
-  const candidates = [];
+  const terminalStatuses = new Set(['complete', 'failed', 'deprecated']);
   for (const ticket of allTickets) {
-    const mismatch = detectWorkflowMismatch(ticket);
-    if (mismatch) {
-      // workflow_mismatch 告警优先发给建议接手人（如 decision_owner / review_owner），其次回退当前责任人
-      const agent = mismatch.alert_target || ticket.next_actor || '荣晖';
-      if (!agent) continue;
-      candidates.push({ ticket, agent, kind: 'workflow_mismatch', mismatch, priority: 1, sortTs: Date.parse(ticket.created || '') || 0 });
-    } else if (!ticket.execution_guard?.suppress_dispatch && ticket.status !== 'paused' && ticket.should_notify && ticket.next_actor && ticket.status !== 'pending_decision') {
-      const staleHint = getStaleDeliveryHint(ticket, 'dispatch');
-      if (staleHint?.stale) {
-        dispatch.clearDispatchEvents(ticket.id);
-        console.log(`[dispatch/ready] Skip #${ticket.id}: stale dispatch (${staleHint.reason})`);
-        continue;
-      }
-      // 依赖门禁：检查是否有未满足的依赖
-      if (store.hasUnmetDependencies(ticket.id)) {
-        console.log(`[dispatch/ready] Skip #${ticket.id}: unmet dependencies`);
-        continue;
-      }
-      if (ticket.advance_chain && ticket.advance_chain.ok === false) {
-        console.log(`[dispatch/ready] Skip #${ticket.id}: invalid advance chain (${ticket.advance_chain.code || 'unknown'})`);
-        continue;
-      }
-      if (ticket.status === 'queued') {
-        try {
-          store.tryAcquireExecutionReservation({
-            lane_key: 'single_running',
-            agent_id: ticket.assigned_agent,
-            ticket_id: ticket.id,
-            state: 'reserved',
-            holder_kind: 'dispatch',
-            holder_key: `ticket:${ticket.id}`,
-          });
-        } catch (err) {
-          if (err?.code === 'EXECUTION_RESERVATION_CONFLICT') {
-            console.log(`[dispatch/ready] Skip #${ticket.id}: assigned_agent ${ticket.assigned_agent} reservation conflict #${err?.conflict_reservation?.ticket_id || 'unknown'}`);
-            continue;
-          }
-          throw err;
-        }
-        const refreshed = enrichTicketForApi(store.getTicketById(ticket.id));
-        candidates.push({ ticket: refreshed, agent: refreshed.next_actor, kind: undefined, mismatch: null, priority: 2, sortTs: Date.parse(refreshed.created || '') || 0 });
-        continue;
-      }
-      candidates.push({ ticket, agent: ticket.next_actor, kind: undefined, mismatch: null, priority: 2, sortTs: Date.parse(ticket.created || '') || 0 });
+    if (terminalStatuses.has(ticket.status) && (ticket.dispatch_state || ticket.execution_guard?.reservation || ticket.execution_guard?.suppress_dispatch)) {
+      dispatch.clearDispatchEvents(ticket.id);
     }
   }
 
-  for (const item of [...collectQueuedStaleNudges(allTickets), ...collectAuditResultNudges(allTickets)]) {
-    const ticket = ticketById.get(item.ticket_id);
-    if (!ticket) continue;
-    candidates.push({
-      ticket,
-      agent: item.agent,
-      kind: 'nudge',
-      mismatch: null,
-      readyItem: item,
-      priority: 0,
-      sortTs: getTicketLastActivityTs(ticket) || Date.parse(ticket.created || '') || 0,
-    });
-  }
-
-  console.log('[dispatch/ready] Candidates:', candidates.length);
-
-  // 按 agent 分组，每个 agent 只返回最早 1 张
-  const byAgent = new Map();
-  for (const candidate of candidates) {
-    const { ticket, agent, kind, mismatch, readyItem } = candidate;
-    console.log(`[dispatch/ready] Checking #${ticket.id} agent=${agent} kind=${kind || 'normal'}`);
-    const governance = kind === 'nudge'
-      ? {
-          reason: readyItem.nudge_key,
-          dedupe_key: readyItem.dedupe_key,
-          escalation_tier: readyItem.escalation_tier,
-        }
-      : buildDispatchEventGovernance({
-          ticket,
-          agent,
-          kind,
-          mismatch,
-        });
-    const statusKey = governance.reason;
-
-    if (kind !== 'nudge') {
-      const hasRecent = dispatch.hasRecentDispatch(ticket.id, agent, statusKey, 60);
-      if (hasRecent) continue;
-    }
-
-    const existing = byAgent.get(agent);
-    if (!existing) {
-      byAgent.set(agent, candidate);
-      continue;
-    }
-
-    const currentPriority = Number(candidate.priority ?? 2);
-    const existingPriority = Number(existing.priority ?? 2);
-    if (currentPriority < existingPriority || (currentPriority === existingPriority && candidate.sortTs < existing.sortTs)) {
-      byAgent.set(agent, candidate);
-    }
-  }
-
-  // 生成派发事件并返回
-  const ready = [];
-  for (const { ticket, agent, kind, mismatch, readyItem } of byAgent.values()) {
-    if (kind === 'nudge') {
-      ready.push(readyItem);
-      continue;
-    }
-
-    const governance = buildDispatchEventGovernance({ ticket, agent, kind, mismatch });
-    const statusKey = governance.reason;
-    const latestHandshake = dispatch.getLatestDispatchHandshakeState(ticket.id, agent, statusKey);
-    let dispatchId = dispatch.getUnackedDispatchEvent(ticket.id, agent, statusKey);
-    if (!dispatchId) {
-      dispatchId = dispatch.recordDispatchEvent(ticket.id, agent, statusKey, {
-        retry_count: latestHandshake?.should_retry ? Number(latestHandshake.dispatch_retry_count || 0) + 1 : 0,
-      });
-    }
-
-    const delivery = resolveDispatchDelivery({ agent, ticketId: ticket.id, kind });
-
-    if (kind === 'workflow_mismatch') {
-      const alertMsg = mismatch.reason || '状态与评论不一致';
-      ready.push({
-        dispatch_id: dispatchId,
-        agent,
-        ticket_id: ticket.id,
-        title: ticket.title,
-        status: ticket.status,
-        next_actor: agent,
-        execution_mode: ticket.execution_mode,
-        worker_stats: ticket.worker_stats,
-        dispatch_retry_count: latestHandshake?.should_retry ? Number(latestHandshake.dispatch_retry_count || 0) + 1 : Number(latestHandshake?.dispatch_retry_count || 0),
-        reason: governance.reason,
-        dedupe_key: governance.dedupe_key,
-        escalation_tier: governance.escalation_tier,
-        kind: 'workflow_mismatch',
-        workflow_mismatch: mismatch,
-        ...delivery,
-        message: `⚠️ [workflow_mismatch 告警]\n\n#${ticket.id} ${ticket.title}\n当前状态：${ticket.status}\n问题：${alertMsg}\n推荐状态：${mismatch.recommended_status}\n\n请核实工单当前阶段：\n- 如果确实需要决策/授权，请通过 transition API 切到 ${mismatch.recommended_status}\n- 如果仍在正常施工中，可以忽略此告警（评论语义可能被误判）`,
-      });
-    } else {
-      const assignment = store.createOrReuseAssignment({
-        ticket_id: ticket.id,
-        dispatch_event_id: dispatchId,
-        agent_id: agent,
-        gateway_id: delivery.target_gateway_id,
-        execution_mode: ticket.execution_mode,
-        assignment_status: 'created',
-        intent: delivery.delivery_intent || 'dispatch',
-        role: 'execute',
-        stage: ticket.status,
-        target_session_key: delivery.target_session_key,
-        transport: delivery.transport,
-      });
-      store.updateExecutionReservation(ticket.id, {
-        assignment_id: assignment.assignment_id,
-        dispatch_event_id: dispatchId,
-        state: 'reserved',
-        holder_kind: 'assignment',
-        holder_key: assignment.assignment_id,
-        release_reason: null,
-        released_at: null,
-      });
-      dispatch.emitAssignmentDeliveryRequested(assignment.assignment_id, ticket.id, dispatchId, {
-        target_gateway_id: delivery.target_gateway_id,
-        transport: delivery.transport,
-        target_session_key: delivery.target_session_key,
-      });
-      const assignmentContract = {
-        ...buildAssignmentContract(assignment, ticket),
-        assignment_token: assignment.assignment_token,
-      };
-
-      ready.push({
-        dispatch_id: dispatchId,
-        agent,
-        ticket_id: ticket.id,
-        title: ticket.title,
-        status: ticket.status,
-        next_actor: ticket.next_actor,
-        execution_mode: ticket.execution_mode,
-        worker_stats: ticket.worker_stats,
-        dispatch_retry_count: latestHandshake?.should_retry ? Number(latestHandshake.dispatch_retry_count || 0) + 1 : Number(latestHandshake?.dispatch_retry_count || 0),
-        reason: governance.reason,
-        dedupe_key: governance.dedupe_key,
-        escalation_tier: governance.escalation_tier,
-        reservation: ticket.execution_guard?.reservation || store.getExecutionReservationForTicket(ticket.id),
-        reservation_conflict: ticket.execution_guard?.reservation_conflict || null,
-        assignment_id: assignment.assignment_id,
-        assignment: assignmentContract,
-        reset_session: true,
-        session_reset_reason: 'assignment_refresh',
-        ...delivery,
-        message: buildAgentDispatchMessage({ ticket, agent, assignment }),
-      });
-    }
-  }
+  const ready = buildDispatchReadyProjection(allTickets, {
+    requestId,
+    buildAgentDispatchMessage,
+    detectWorkflowMismatch,
+    getStaleDeliveryHint,
+    collectReadyNudges,
+    enrichTicketForApi,
+    getTicketLastActivityTs,
+    nudgeLevelOrder: NUDGE_LEVEL_ORDER,
+  });
 
   if (source === 'compare') {
     const projectionBefore = store.getDispatchReadyProjection();
     store.replaceAllDispatchReadyProjection(ready);
     return res.json({
       ready,
+      request_id: requestId,
       _source: 'compare',
       _compare: {
         legacy_count: ready.length,
@@ -2570,7 +2295,7 @@ app.get('/api/dispatch/ready', (req, res) => {
     });
   }
   store.replaceAllDispatchReadyProjection(ready);
-  res.json({ ready });
+  res.json({ ready, request_id: requestId });
 });
 
 function parsePositiveInt(value) {
@@ -2609,7 +2334,11 @@ app.post('/api/dispatch/:dispatch_id/ack', (req, res) => {
   const event = dispatch.getDispatchEventById(dispatchId);
   res.json({
     success: true,
+    request_id: getRequestId(req, res),
     dispatch_id: dispatchId,
+    dispatch_event_id: dispatchId,
+    status_before: event?.status || null,
+    status_after: event?.status || null,
     dispatch_state: event?.dispatch_state || 'awaiting_receipt',
     awaiting_receipt_from: event?.awaiting_receipt_from || null,
     dispatch_ack_deadline_at: event?.dispatch_ack_deadline_at || null,
@@ -2630,8 +2359,12 @@ app.post('/api/dispatch/ack', (req, res) => {
   const event = dispatch.getDispatchEventById(dispatchId);
   res.json({
     success: true,
+    request_id: getRequestId(req, res),
     dispatch_id: dispatchId,
+    dispatch_event_id: dispatchId,
     compatibility: true,
+    status_before: event?.status || null,
+    status_after: event?.status || null,
     dispatch_state: event?.dispatch_state || 'awaiting_receipt',
     awaiting_receipt_from: event?.awaiting_receipt_from || null,
     dispatch_ack_deadline_at: event?.dispatch_ack_deadline_at || null,
@@ -2641,7 +2374,8 @@ app.post('/api/dispatch/ack', (req, res) => {
 
 // GET /api/notifications/ready - 获取待通知结果
 app.get('/api/notifications/ready', (req, res) => {
-  const NOTIFY_STATUSES = new Set(['complete', 'failed', 'pending_decision']);
+  const requestId = getRequestId(req, res);
+  const NOTIFY_STATUSES = new Set(['complete', 'failed', 'pending_decision', 'blocked']);
   const tickets = store.getAllTickets()
     .map(enrichTicketForApi)
     .filter(t => NOTIFY_STATUSES.has(t.status) && t.should_notify);
@@ -2663,9 +2397,13 @@ app.get('/api/notifications/ready', (req, res) => {
       message = `❌ 工单失败\n\n#${ticket.id} ${ticket.title}\n错误：${ticket.error || '执行失败'}`;
     } else if (eventType === 'pending_decision') {
       message = `⏸️ 工单等待决策\n\n#${ticket.id} ${ticket.title}\n决策摘要：${ticket.decision_summary || '需要老大决策'}`;
+    } else if (eventType === 'blocked') {
+      message = `🚧 工单已阻塞\n\n#${ticket.id} ${ticket.title}\n阻塞摘要：${ticket.blocker_summary || ticket.decision_summary || '需要老大关注阻塞并协调处理'}`;
     }
 
-    const target_actor = ticket.decision_owner || '荣晖';
+    const target_actor = ['pending_decision', 'blocked'].includes(eventType)
+      ? (ticket.decision_owner || '荣晖')
+      : (ticket.decision_owner || '荣晖');
     const target_session_key = getNotificationSessionKey({
       status: ticket.status,
       reviewOwner: ticket.review_owner,
@@ -2704,12 +2442,20 @@ app.get('/api/notifications/ready', (req, res) => {
     }
 
     ready.push({
+      request_id: requestId,
       event_id: eventId,
+      notification_event_id: eventId,
       type: eventType,
       ticket_id: ticket.id,
       title: ticket.title,
       status: ticket.status,
+      status_before: ticket.status,
+      status_after: ticket.status,
       target_actor,
+      computed_actor: ticket.current_actor || ticket.next_actor || target_actor,
+      override_actor: ticket.next_actor_override || null,
+      target_session: target_session_key,
+      target_actor_session: target_session_key,
       reason: governance.reason,
       dedupe_key: governance.dedupe_key,
       escalation_tier: governance.escalation_tier,
@@ -2719,7 +2465,31 @@ app.get('/api/notifications/ready', (req, res) => {
     });
   }
 
-  res.json({ ready });
+  res.json({ ready, request_id: requestId });
+});
+
+// GET /api/pending-forwards - 查看待补偿/已补偿的 Telegram 转发记录
+app.get('/api/pending-forwards', (req, res) => {
+  const unresolvedOnly = String(req.query.unresolved_only || req.query.unresolvedOnly || 'false').toLowerCase() === 'true';
+  const ticketIdRaw = req.query.ticket_id ?? req.query.ticketId;
+  const ticketId = ticketIdRaw === undefined ? null : Number.parseInt(String(ticketIdRaw), 10);
+  if (ticketIdRaw !== undefined && (!Number.isInteger(ticketId) || ticketId <= 0)) {
+    return res.status(400).json({ error: 'Bad request', message: 'ticket_id 必须是正整数' });
+  }
+
+  const items = dispatch.listPendingForwards({
+    channel: 'telegram',
+    unresolvedOnly,
+    ticketId,
+    limit: Number.parseInt(String(req.query.limit || '50'), 10) || 50,
+  });
+
+  return res.json({
+    ready: items,
+    items,
+    unresolved_count: items.filter((item) => !item.resolved_at).length,
+    request_id: getRequestId(req, res),
+  });
 });
 
 // POST /api/notifications/:event_id/ack - 确认通知
@@ -2732,7 +2502,11 @@ app.post('/api/notifications/:event_id/ack', (req, res) => {
   if (!ok) {
     return res.status(404).json({ error: 'Not found', message: `event_id ${eventId} 不存在` });
   }
-  res.json({ success: true, event_id: eventId });
+  res.json({
+    success: true,
+    request_id: getRequestId(req, res),
+    event_id: eventId,
+  });
 });
 
 // POST /api/notifications/ack - 兼容旧调用（body/query 携带 event_id）
@@ -2745,7 +2519,12 @@ app.post('/api/notifications/ack', (req, res) => {
   if (!ok) {
     return res.status(404).json({ error: 'Not found', message: `event_id ${eventId} 不存在` });
   }
-  res.json({ success: true, event_id: eventId, compatibility: true });
+  res.json({
+    success: true,
+    request_id: getRequestId(req, res),
+    event_id: eventId,
+    compatibility: true,
+  });
 });
 
 // 关系建模 API（补充验证 / smoke / review sample）
@@ -2879,17 +2658,24 @@ app.get('/api/tickets/:id/dependencies', (req, res) => {
 
 // ── Audit API（平台巡检长期未动工单）──
 
-const AUDIT_STALE_TRIAGE_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_TRIAGE_MINUTES) || 5;
-const AUDIT_STALE_RUNNING_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_RUNNING_MINUTES) || 10;
-const AUDIT_STALE_PAUSED_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_PAUSED_MINUTES) || 240;
-const AUDIT_STALE_DONE_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_DONE_MINUTES) || 10;
-const AUDIT_STALE_REVIEW_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_REVIEW_MINUTES) || 10;
-const AUDIT_STALE_PENDING_DECISION_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_PENDING_DECISION_MINUTES) || 720;
-const AUDIT_STALE_BLOCKED_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_BLOCKED_MINUTES) || 240;
+function getDefaultStatusSlaMinutes(status, fallback) {
+  const minutes = Number(getStatusMeta(status)?.sla?.default_minutes);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : fallback;
+}
+
+const AUDIT_STALE_TRIAGE_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_TRIAGE_MINUTES) || getDefaultStatusSlaMinutes('triage', 5);
+const AUDIT_STALE_RUNNING_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_RUNNING_MINUTES) || getDefaultStatusSlaMinutes('running', 30);
+const AUDIT_STALE_PAUSED_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_PAUSED_MINUTES) || getDefaultStatusSlaMinutes('paused', 240);
+const AUDIT_STALE_DONE_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_DONE_MINUTES) || getDefaultStatusSlaMinutes('done', 15);
+const AUDIT_STALE_REVIEW_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_REVIEW_MINUTES) || getDefaultStatusSlaMinutes('review', 60);
+const AUDIT_STALE_PENDING_DECISION_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_PENDING_DECISION_MINUTES) || getDefaultStatusSlaMinutes('pending_decision', 720);
+const AUDIT_STALE_BLOCKED_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_BLOCKED_MINUTES) || getDefaultStatusSlaMinutes('blocked', 240);
 const AUDIT_REQUEST_RETRY_MINUTES = parsePositiveInt(process.env.AUDIT_REQUEST_RETRY_MINUTES) || 30;
-const QUEUED_NUDGE_STALE_MINUTES = parsePositiveInt(process.env.QUEUED_NUDGE_STALE_MINUTES) || 10;
-const AUDIT_STALE_QUEUED_AFTER_RECEIPT_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_QUEUED_AFTER_RECEIPT_MINUTES) || 10;
-const TICKET_NUDGE_THROTTLE_MINUTES = parsePositiveInt(process.env.TICKET_NUDGE_THROTTLE_MINUTES) || 10;
+const QUEUED_NUDGE_STALE_MINUTES = parsePositiveInt(process.env.QUEUED_NUDGE_STALE_MINUTES) || getDefaultStatusSlaMinutes('queued', 10);
+const AUDIT_STALE_QUEUED_AFTER_RECEIPT_MINUTES = parsePositiveInt(process.env.AUDIT_STALE_QUEUED_AFTER_RECEIPT_MINUTES) || getDefaultStatusSlaMinutes('queued', 10);
+const TICKET_NUDGE_THROTTLE_MINUTES = parsePositiveInt(process.env.TICKET_NUDGE_THROTTLE_MINUTES) || 30;
+const MANUAL_NUDGE_STATUS_KEY = 'nudge_manual';
+const NUDGE_LEVEL_ORDER = { L3: 0, L2: 1, L1: 2 };
 
 const AUDIT_THRESHOLDS = {
   triage: AUDIT_STALE_TRIAGE_MINUTES,
@@ -2910,6 +2696,7 @@ const AUDIT_RESULT_ALLOWED_CONCLUSIONS = new Set([
   'stale_review',
   'stale_pending_decision',
   'stale_blocked',
+  'stale_queued_after_receipt',
   'no_issue',
 ]);
 const AUDIT_RESULT_ALLOWED_ACTIONS = new Set([
@@ -2930,6 +2717,67 @@ function computeTicketStaleMinutes(ticket, now = Date.now()) {
   const lastUpdateTs = getTicketLastActivityTs(ticket);
   if (!Number.isFinite(lastUpdateTs)) return null;
   return (now - lastUpdateTs) / (60 * 1000);
+}
+
+function getTicketSlaMinutes(ticket = {}) {
+  return getDefaultStatusSlaMinutes(ticket.status, null);
+}
+
+function resolveNudgeLevel(ticket, staleMinutes) {
+  const slaMinutes = getTicketSlaMinutes(ticket);
+  if (!Number.isFinite(staleMinutes) || !Number.isFinite(slaMinutes) || slaMinutes <= 0) return null;
+  if (staleMinutes >= slaMinutes * 3) return 'L3';
+  if (staleMinutes >= slaMinutes * 2) return 'L2';
+  if (staleMinutes >= slaMinutes) return 'L1';
+  return null;
+}
+
+function buildTieredNudgeStatusKey(baseKey, level) {
+  const normalizedBase = String(baseKey || '').trim().replace(/^nudge_/, '');
+  const normalizedLevel = String(level || 'L1').trim().toLowerCase();
+  return `nudge_${normalizedLevel}_${normalizedBase}`;
+}
+
+function dedupeActors(actors = []) {
+  const seen = new Set();
+  const result = [];
+  for (const actor of actors) {
+    const normalized = normalizeOptionalAgent(actor);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function resolveNudgeTargets(ticket, level, { preferredActor = null } = {}) {
+  if (level === 'L3') {
+    return dedupeActors([
+      preferredActor,
+      resolveRoleActor(ticket, 'decision_owner'),
+    ]);
+  }
+  if (level === 'L2') {
+    return dedupeActors([
+      preferredActor,
+      resolveRoleActor(ticket, 'review_owner'),
+      resolveRoleActor(ticket, 'triage_owner'),
+    ]);
+  }
+  return dedupeActors([
+    preferredActor,
+    resolveRoleActor(ticket, 'current_actor'),
+    resolveRoleActor(ticket, 'assigned_agent'),
+  ]);
+}
+
+function describeNudgeLevel(level, slaMinutes, staleMinutes) {
+  const ratio = Number.isFinite(slaMinutes) && slaMinutes > 0 && Number.isFinite(staleMinutes)
+    ? `${(staleMinutes / slaMinutes).toFixed(1)}x SLA`
+    : 'SLA 超时';
+  if (level === 'L3') return `${level}（${ratio}，升级到决策人）`;
+  if (level === 'L2') return `${level}（${ratio}，升级到 review_owner + triage_owner）`;
+  return `${level}（${ratio}，提醒当前责任人）`;
 }
 
 function buildAuditRequestContract(ticket, auditId, auditType, staleMinutes) {
@@ -3066,19 +2914,20 @@ function buildAuditResultCommentContent(ticket, auditResult) {
   ].join('\n');
 }
 
-function buildQueuedStaleNudgeMessage({ ticket, agent, staleMinutes }) {
+function buildQueuedStaleNudgeMessage({ ticket, agent, staleMinutes, nudgeLevel, slaMinutes }) {
   const assignment = store.findLatestAssignmentForTicket(ticket.id, agent);
   const waitingForWorker = ticket.dispatch_state === 'receipt_accepted'
     && ticket.last_dispatch_receipt_decision === 'accepted'
-    && !(ticket.execution_guard?.has_worker_evidence)
-    && Number(ticket.execution_guard?.active_workers || 0) <= 0;
+    && Boolean(ticket.execution_guard?.requires_worker)
+    && !ticket.execution_guard?.has_active_execution_evidence;
   const base = [
-    `⏰ [queued_stale 催办]`,
+    `⏰ [queued_stale 催办 ${nudgeLevel}]`,
     ``,
     `#${ticket.id} ${ticket.title}`,
     `状态：${ticket.status}`,
-    `当前责任人：${agent}`,
-    `已滞留：${Math.round(staleMinutes)} 分钟（超过 queued 催办阈值 ${QUEUED_NUDGE_STALE_MINUTES} 分钟）`,
+    `催办对象：${agent}`,
+    `催办层级：${describeNudgeLevel(nudgeLevel, slaMinutes, staleMinutes)}`,
+    `已滞留：${Math.round(staleMinutes)} 分钟（queued SLA ${slaMinutes} 分钟）`,
     ``,
     waitingForWorker
       ? `当前已接单成功，但仍未开工成功（receipt accepted 且暂无 worker / running 证据）。请尽快补齐开工前置条件；若无法开工，请明确回写 blocked / pending_decision / failed。`
@@ -3092,16 +2941,17 @@ function buildQueuedStaleNudgeMessage({ ticket, agent, staleMinutes }) {
   return base.join('\n');
 }
 
-function buildAuditNudgeMessage({ ticket, agent, auditResult }) {
+function buildAuditNudgeMessage({ ticket, agent, auditResult, staleMinutes, nudgeLevel, slaMinutes }) {
   const assignment = agent === ticket.assigned_agent
     ? store.findLatestAssignmentForTicket(ticket.id, agent)
     : null;
   const base = [
-    `⏰ [audit_nudge 催办]`,
+    `⏰ [audit_nudge 催办 ${nudgeLevel}]`,
     ``,
     `#${ticket.id} ${ticket.title}`,
     `当前状态：${ticket.status}`,
     `催办对象：${agent}`,
+    `催办层级：${describeNudgeLevel(nudgeLevel, slaMinutes, staleMinutes)}`,
     `审计类型：${auditResult.audit_type}`,
     `审计结论：${auditResult.conclusion}`,
     `建议动作：${auditResult.suggested_action || 'no_action'}`,
@@ -3120,46 +2970,46 @@ function buildAuditNudgeMessage({ ticket, agent, auditResult }) {
   return base.join('\n');
 }
 
-function buildDispatchEventGovernance({ ticket, agent, kind, mismatch = null, nudgeSource = null, nudgeKey = null }) {
-  if (kind === 'workflow_mismatch') {
-    return {
-      reason: mismatch?.category || 'workflow_mismatch',
-      dedupe_key: `dispatch:${ticket.status}:workflow_mismatch:${agent}:${mismatch?.category || 'workflow_mismatch'}`,
-      escalation_tier: 'warning',
-    };
+function buildManualNudgeMessage({ ticket, agent }) {
+  const assignment = agent === ticket.assigned_agent
+    ? store.findLatestAssignmentForTicket(ticket.id, agent)
+    : null;
+  const base = [
+    `⚡ [manual_nudge 催单]`,
+    ``,
+    `#${ticket.id} ${ticket.title}`,
+    `当前状态：${ticket.status}`,
+    `当前责任人：${ticket.current_actor || ticket.next_actor || agent || '未解析'}`,
+    `催单对象：${agent}`,
+    ``,
+    `这是人工触发的一键催单，不会自动改状态。请先核实现场，并尽快补进展评论 / report / transition。`,
+  ];
+
+  if (assignment) {
+    base.push('', buildAgentDispatchMessage({ ticket, agent, assignment }));
   }
 
-  if (kind === 'nudge') {
-    const reason = nudgeKey || nudgeSource || 'nudge';
-    return {
-      reason,
-      dedupe_key: `dispatch:${ticket.status}:${reason}:${agent}`,
-      escalation_tier: nudgeSource === 'audit_result' ? 'escalated' : 'nudge',
-    };
-  }
-
-  return {
-    reason: ticket.status,
-    dedupe_key: `dispatch:${ticket.status}:assignment:${agent}`,
-    escalation_tier: ['done', 'review'].includes(ticket.status) ? 'review' : 'delivery',
-  };
+  return base.join('\n');
 }
 
 function buildNotificationEventGovernance({ ticket, eventType, targetActor }) {
   const actor = targetActor || 'main';
   const isDecision = eventType === 'pending_decision';
+  const isBlocked = eventType === 'blocked';
   const reason = isDecision
     ? 'decision_required'
-    : eventType === 'complete'
-      ? 'execution_complete'
-      : eventType === 'failed'
-        ? 'execution_failed'
-        : eventType;
+    : isBlocked
+      ? 'blocked_attention_required'
+      : eventType === 'complete'
+        ? 'execution_complete'
+        : eventType === 'failed'
+          ? 'execution_failed'
+          : eventType;
 
   return {
     reason,
     dedupe_key: `notify:${ticket.status}:${reason}:${actor}`,
-    escalation_tier: isDecision ? 'decision' : 'result',
+    escalation_tier: (isDecision || isBlocked) ? 'decision' : 'result',
   };
 }
 
@@ -3171,6 +3021,7 @@ function buildNudgeReadyItem({
   message,
   nudgeKey,
   nudgeSource,
+  nudgeLevel = null,
   staleMinutes = null,
   auditResult = null,
 }) {
@@ -3180,6 +3031,7 @@ function buildNudgeReadyItem({
     kind: 'nudge',
     nudgeSource,
     nudgeKey,
+    nudgeLevel,
   });
 
   return {
@@ -3197,12 +3049,15 @@ function buildNudgeReadyItem({
     escalation_tier: governance.escalation_tier,
     nudge_key: nudgeKey,
     nudge_source: nudgeSource,
+    nudge_level: nudgeLevel,
+    nudge_window_minutes: TICKET_NUDGE_THROTTLE_MINUTES,
     ...(staleMinutes === null ? {} : { stale_minutes: Math.round(staleMinutes) }),
     ...(auditResult
       ? {
           audit_result: {
             audit_id: auditResult.audit_id,
             audit_type: auditResult.audit_type,
+            stale_minutes: auditResult.stale_minutes ?? null,
             conclusion: auditResult.conclusion,
             suggested_status: auditResult.suggested_status,
             suggested_actor: auditResult.suggested_actor,
@@ -3225,84 +3080,200 @@ function collectQueuedStaleNudges(allTickets) {
   for (const ticket of allTickets) {
     if (ticket.status !== 'queued') continue;
     if (ticket.execution_guard?.suppress_dispatch) continue;
-    // 仅当「已接单且已真正开工」时跳过催办；接单但未开工（如 requires_worker 且无 worker evidence）在阈值后仍进入 queued_stale 催办
+    // 仅当「已接单且已真正开工」时跳过催办；接单但未开工（如 requires_worker 且无活跃执行证据）在阈值后仍进入 queued_stale 催办
     if (ticket.dispatch_state === 'receipt_accepted' && ticket.last_dispatch_receipt_decision === 'accepted') {
-      const effectivelyStarted = !ticket.execution_guard?.requires_worker || ticket.execution_guard?.has_worker_evidence;
+      const effectivelyStarted = !ticket.execution_guard?.requires_worker || ticket.execution_guard?.has_active_execution_evidence;
       if (effectivelyStarted) continue;
     }
     if (store.hasUnmetDependencies(ticket.id)) continue;
 
-    const agent = normalizeOptionalAgent(ticket.assigned_agent || ticket.next_actor);
-    if (!agent) continue;
-    if (!dispatch.hasRecentDispatch(ticket.id, agent, 'queued', 30 * 24 * 60)) continue;
+    const assignedAgent = normalizeOptionalAgent(ticket.assigned_agent || ticket.next_actor);
+    if (!assignedAgent) continue;
+    if (!dispatch.hasRecentDispatch(ticket.id, assignedAgent, 'queued', 30 * 24 * 60)) continue;
 
     const staleMinutes = computeTicketStaleMinutes(ticket, now);
     if (!Number.isFinite(staleMinutes) || staleMinutes < QUEUED_NUDGE_STALE_MINUTES) continue;
 
-    const statusKey = 'nudge_queued_stale';
-    if (dispatch.hasRecentDispatch(ticket.id, agent, statusKey, TICKET_NUDGE_THROTTLE_MINUTES)) continue;
+    const nudgeLevel = resolveNudgeLevel(ticket, staleMinutes);
+    const slaMinutes = getTicketSlaMinutes(ticket);
+    const rawDecisionOwner = typeof ticket.decision_owner === 'string' ? ticket.decision_owner.trim() : '';
+    const targets = nudgeLevel === 'L3'
+      ? dedupeActors([
+          rawDecisionOwner || resolveRoleActor(ticket, 'decision_owner'),
+          assignedAgent,
+        ])
+      : resolveNudgeTargets(ticket, nudgeLevel, { preferredActor: assignedAgent });
+    if (!nudgeLevel || targets.length === 0) continue;
 
-    let dispatchId = dispatch.getUnackedDispatchEvent(ticket.id, agent, statusKey);
-    if (!dispatchId) {
-      dispatchId = dispatch.recordDispatchEvent(ticket.id, agent, statusKey);
+    const statusKey = buildTieredNudgeStatusKey('queued_stale', nudgeLevel);
+    for (const agent of targets) {
+      const delivery = resolveDispatchDelivery({ agent, ticketId: ticket.id, kind: 'nudge', nudgeSource: 'queued_stale' });
+      const hasUnresolvedForward = dispatch.listPendingForwards({
+        channel: 'telegram',
+        unresolvedOnly: true,
+        ticketId: ticket.id,
+        limit: 50,
+      }).some((row) => row.event_kind === 'dispatch_nudge'
+        && row.target_session_key === delivery.target_session_key);
+      if (!hasUnresolvedForward && dispatch.hasRecentDispatch(ticket.id, agent, statusKey, TICKET_NUDGE_THROTTLE_MINUTES)) continue;
+
+      let dispatchId = dispatch.getUnackedDispatchEvent(ticket.id, agent, statusKey);
+      if (!dispatchId) {
+        dispatchId = dispatch.recordDispatchEvent(ticket.id, agent, statusKey);
+      }
+
+      ready.push(buildNudgeReadyItem({
+        ticket,
+        agent,
+        dispatchId,
+        delivery,
+        message: buildQueuedStaleNudgeMessage({ ticket, agent, staleMinutes, nudgeLevel, slaMinutes }),
+        nudgeKey: statusKey,
+        nudgeSource: 'queued_stale',
+        nudgeLevel,
+        staleMinutes,
+      }));
     }
-
-    ready.push(buildNudgeReadyItem({
-      ticket,
-      agent,
-      dispatchId,
-      delivery: resolveDispatchDelivery({ agent, ticketId: ticket.id, kind: 'nudge' }),
-      message: buildQueuedStaleNudgeMessage({ ticket, agent, staleMinutes }),
-      nudgeKey: statusKey,
-      nudgeSource: 'queued_stale',
-      staleMinutes,
-    }));
   }
 
   return ready;
 }
 
 function collectAuditResultNudges(allTickets) {
+  const targetTicketIds = new Set(allTickets.map((ticket) => Number(ticket.id)).filter(Number.isFinite));
   const latestByTicketId = new Map();
-  for (const result of dispatch.listAuditResults({ limit: 200 })) {
-    if (!latestByTicketId.has(result.ticket_id)) {
-      latestByTicketId.set(result.ticket_id, result);
+  for (const result of dispatch.listAuditResults({ limit: 2000 })) {
+    const ticketId = Number(result.ticket_id);
+    if (!targetTicketIds.has(ticketId)) continue;
+    const existing = latestByTicketId.get(ticketId);
+    if (!existing) {
+      latestByTicketId.set(ticketId, result);
+      continue;
+    }
+    const existingTs = Date.parse(existing.updated_at || existing.created_at || '') || 0;
+    const resultTs = Date.parse(result.updated_at || result.created_at || '') || 0;
+    if (resultTs > existingTs || (resultTs === existingTs && Number(result.id || 0) > Number(existing.id || 0))) {
+      latestByTicketId.set(ticketId, result);
     }
   }
 
+  const now = Date.now();
   const ready = [];
   for (const ticket of allTickets) {
-    if (!['running', 'review'].includes(ticket.status)) continue;
+    if (!['running', 'review', 'done'].includes(ticket.status)) continue;
     const auditResult = latestByTicketId.get(ticket.id);
     if (!auditResult) continue;
     if (auditResult.audit_type !== `stale_${ticket.status}`) continue;
     if (!AUDIT_NUDGEABLE_ACTIONS.has(auditResult.suggested_action || '')) continue;
 
-    const agent = resolveAuditSuggestedActor(ticket, auditResult);
-    if (!agent) continue;
+    const rawStaleMinutes = Number.isFinite(Number(auditResult.stale_minutes))
+      ? Number(auditResult.stale_minutes)
+      : computeTicketStaleMinutes(ticket, now);
+    const inferredStaleMinutes = Number.isFinite(rawStaleMinutes)
+      ? rawStaleMinutes
+      : Math.max(getTicketSlaMinutes(ticket), 0);
+    if (!Number.isFinite(inferredStaleMinutes) || inferredStaleMinutes <= 0) continue;
+    const nudgeLevel = resolveNudgeLevel(ticket, inferredStaleMinutes);
+    console.log('[audit_result_nudge]', {
+      ticket_id: ticket.id,
+      audit_type: auditResult.audit_type,
+      raw_stale_minutes: rawStaleMinutes,
+      inferred_stale_minutes: inferredStaleMinutes,
+      nudge_level: nudgeLevel,
+      suggested_action: auditResult.suggested_action,
+    });
+    const slaMinutes = getTicketSlaMinutes(ticket);
+    const preferredActor = resolveAuditSuggestedActor(ticket, auditResult);
+    const targets = resolveNudgeTargets(ticket, nudgeLevel, { preferredActor });
+    if (!nudgeLevel || targets.length === 0) continue;
 
-    const statusKey = `nudge_${auditResult.audit_type}_${auditResult.suggested_action}`;
-    if (dispatch.hasRecentDispatch(ticket.id, agent, statusKey, TICKET_NUDGE_THROTTLE_MINUTES)) continue;
+    const statusKey = buildTieredNudgeStatusKey(`${auditResult.audit_type}_${auditResult.suggested_action}`, nudgeLevel);
+    for (const agent of targets) {
+      const delivery = resolveDispatchDelivery({ agent, ticketId: ticket.id, kind: 'nudge', nudgeSource: 'audit_result' });
+      const hasUnresolvedForward = dispatch.listPendingForwards({
+        channel: 'telegram',
+        unresolvedOnly: true,
+        ticketId: ticket.id,
+        limit: 50,
+      }).some((row) => row.event_kind === 'dispatch_nudge'
+        && row.target_session_key === delivery.target_session_key);
+      if (!hasUnresolvedForward && dispatch.hasRecentDispatch(ticket.id, agent, statusKey, TICKET_NUDGE_THROTTLE_MINUTES)) continue;
 
-    let dispatchId = dispatch.getUnackedDispatchEvent(ticket.id, agent, statusKey);
-    if (!dispatchId) {
-      dispatchId = dispatch.recordDispatchEvent(ticket.id, agent, statusKey);
+      let dispatchId = dispatch.getUnackedDispatchEvent(ticket.id, agent, statusKey);
+      if (!dispatchId) {
+        dispatchId = dispatch.recordDispatchEvent(ticket.id, agent, statusKey);
+      }
+
+      ready.push(buildNudgeReadyItem({
+        ticket,
+        agent,
+        dispatchId,
+        delivery,
+        message: buildAuditNudgeMessage({ ticket, agent, auditResult, staleMinutes: inferredStaleMinutes, nudgeLevel, slaMinutes }),
+        nudgeKey: statusKey,
+        nudgeSource: 'audit_result',
+        nudgeLevel,
+        staleMinutes: inferredStaleMinutes,
+        auditResult,
+      }));
     }
+  }
+
+  return ready;
+}
+
+function collectManualNudges(allTickets) {
+  const ticketById = new Map(allTickets.map((ticket) => [ticket.id, ticket]));
+  const ready = [];
+
+  for (const event of dispatch.listPendingDispatchEventsByStatusPrefix(MANUAL_NUDGE_STATUS_KEY, { limit: 200 })) {
+    const ticket = ticketById.get(event.ticket_id);
+    if (!ticket) continue;
+    if (['complete', 'failed', 'deprecated'].includes(ticket.status)) continue;
+
+    const liveActor = normalizeOptionalAgent(ticket.current_actor || ticket.next_actor || ticket.assigned_agent);
+    if (!liveActor || liveActor !== event.agent) continue;
+    if (dispatch.hasRecentDispatch(ticket.id, event.agent, MANUAL_NUDGE_STATUS_KEY, TICKET_NUDGE_THROTTLE_MINUTES)) continue;
 
     ready.push(buildNudgeReadyItem({
       ticket,
-      agent,
-      dispatchId,
-      delivery: resolveDispatchDelivery({ agent, ticketId: ticket.id, kind: 'nudge' }),
-      message: buildAuditNudgeMessage({ ticket, agent, auditResult }),
-      nudgeKey: statusKey,
-      nudgeSource: 'audit_result',
-      auditResult,
+      agent: event.agent,
+      dispatchId: event.id,
+      delivery: resolveDispatchDelivery({ agent: event.agent, ticketId: ticket.id, kind: 'nudge', nudgeSource: 'manual' }),
+      message: buildManualNudgeMessage({ ticket, agent: event.agent }),
+      nudgeKey: MANUAL_NUDGE_STATUS_KEY,
+      nudgeSource: 'manual',
+      nudgeLevel: 'L1',
     }));
   }
 
   return ready;
 }
+
+function collectReadyNudges(allTickets) {
+  return [
+    ...collectQueuedStaleNudges(allTickets),
+    ...collectAuditResultNudges(allTickets),
+    ...collectManualNudges(allTickets),
+  ].sort((a, b) => {
+    const levelDiff = (NUDGE_LEVEL_ORDER[a.nudge_level] ?? 99) - (NUDGE_LEVEL_ORDER[b.nudge_level] ?? 99);
+    if (levelDiff !== 0) return levelDiff;
+    const staleDiff = Number(b.stale_minutes ?? 0) - Number(a.stale_minutes ?? 0);
+    if (staleDiff !== 0) return staleDiff;
+    return Number(a.ticket_id || 0) - Number(b.ticket_id || 0);
+  });
+}
+
+app.get('/api/nudges/ready', (req, res) => {
+  const requestId = getRequestId(req, res);
+  const allTickets = store.getAllTickets().map(enrichTicketForApi);
+  const ready = collectReadyNudges(allTickets).map((item) => ({
+    ...item,
+    request_id: requestId,
+    dispatch_event_id: item.dispatch_id,
+  }));
+  return res.json({ request_id: requestId, ready });
+});
 
 // GET /api/audits/ready
 // ?source=legacy|projection|compare (default: legacy). 审计只产 signal，双写 audit.signal.* 到 domain_events 并更新 audit_ready_projection。
@@ -3335,11 +3306,12 @@ app.get('/api/audits/ready', (req, res) => {
 
   const ready = [];
   for (const ticket of allTickets) {
+    if (ticket.status === 'deprecated') continue;
     const isQueuedAcceptedPendingStart = ticket.status === 'queued'
       && ticket.dispatch_state === 'receipt_accepted'
       && ticket.last_dispatch_receipt_decision === 'accepted'
-      && !(ticket.execution_guard?.has_worker_evidence)
-      && Number(ticket.execution_guard?.active_workers || 0) <= 0;
+      && Boolean(ticket.execution_guard?.requires_worker)
+      && !ticket.execution_guard?.has_active_execution_evidence;
 
     const threshold = isQueuedAcceptedPendingStart
       ? AUDIT_STALE_QUEUED_AFTER_RECEIPT_MINUTES
@@ -3352,7 +3324,21 @@ app.get('/api/audits/ready', (req, res) => {
     const auditType = isQueuedAcceptedPendingStart
       ? 'stale_queued_after_receipt'
       : `stale_${ticket.status}`;
-    if (dispatch.hasResolvedAudit(ticket.id, auditType)) continue;
+    const latestResolvedAudit = dispatch.getLatestResolvedAudit(ticket.id, auditType);
+    if (latestResolvedAudit) {
+      const latestResolvedAt = Date.parse(latestResolvedAudit.created_at || '');
+      const cycleAnchorAt = Date.parse(ticket.last_update || '');
+      const lastReceiptAt = Date.parse(ticket.last_dispatch_receipt_at || '');
+      const isFreshQueuedCycle = (auditType === 'stale_queued'
+        && Number.isFinite(latestResolvedAt)
+        && Number.isFinite(cycleAnchorAt)
+        && latestResolvedAt < cycleAnchorAt)
+        || (auditType === 'stale_queued_after_receipt'
+          && Number.isFinite(lastReceiptAt)
+          && Number.isFinite(latestResolvedAt)
+          && lastReceiptAt > latestResolvedAt);
+      if (!isFreshQueuedCycle && dispatch.hasResolvedAudit(ticket.id, auditType)) continue;
+    }
 
     const pendingAudit = dispatch.getPendingAuditEvent(ticket.id, auditType);
     if (pendingAudit?.acked_at) {
@@ -3488,6 +3474,7 @@ app.post('/api/audits/:id/result', (req, res) => {
   const reason = normalizeOptionalText(req.body?.reason, 4000);
   const summary = normalizeOptionalText(req.body?.summary, 4000);
   const author = normalizeOptionalAgent(req.body?.author) || 'sheeply';
+  const staleMinutesAtAudit = computeTicketStaleMinutes(ticket);
 
   const comment = {
     id: buildCommentId(),
@@ -3525,6 +3512,7 @@ app.post('/api/audits/:id/result', (req, res) => {
     ticketId: ticket.id,
     auditType: auditEvent.audit_type,
     statusSnapshot: auditEvent.status_snapshot,
+    staleMinutes: staleMinutesAtAudit,
     conclusion,
     suggestedStatus,
     suggestedActor,
@@ -3634,6 +3622,20 @@ app.get('/api/workflow/schema', (_req, res) => {
   res.json({ data: getWorkflowSchema() });
 });
 
+// GET /api/playbooks/:stage - 当前 stage 的结构化 SOP / gate checklist
+app.get('/api/playbooks/:stage', (req, res) => {
+  const stage = String(req.params.stage || '').trim().toLowerCase();
+  const mode = String(req.query.mode || '').trim().toLowerCase() || null;
+  const role = String(req.query.role || '').trim().toLowerCase() || null;
+  const snapshot = buildPlaybookStageSnapshot(stage, { mode, role });
+
+  if (!snapshot) {
+    return res.status(404).json({ error: 'Playbook stage not found', message: `stage ${req.params.stage} 不存在` });
+  }
+
+  return res.json({ data: snapshot });
+});
+
 // GET /api/live-acceptance/tickets/:id - reviewer/read-only live acceptance gate
 app.get('/api/live-acceptance/tickets/:id', (req, res) => {
   const id = Number(req.params.id);
@@ -3643,6 +3645,7 @@ app.get('/api/live-acceptance/tickets/:id', (req, res) => {
   }
 
   const gate = buildLiveAcceptanceGate(ticket, {
+    enrichTicketForApi,
     expectedBundleVersion: req.query.expected_bundle_version,
     expectedBundleChecksum: req.query.expected_bundle_checksum,
     requiredTicketActions: req.query.required_ticket_actions,
@@ -3698,23 +3701,9 @@ agentRouter.post('/tickets', (req, res) => {
   });
 });
 
-// POST /tickets/:id/queue - agent-facing 执行 queue
-agentRouter.post('/tickets/:id/queue', (req, res) => runAgentTicketAction(req, res, 'queue'));
-
-// POST /tickets/:id/start-work - agent-facing 执行 start_work
-agentRouter.post('/tickets/:id/start-work', (req, res) => runAgentTicketAction(req, res, 'start_work'));
-
-// POST /tickets/:id/pause - agent-facing 执行 pause
-agentRouter.post('/tickets/:id/pause', (req, res) => runAgentTicketAction(req, res, 'pause'));
-
-// POST /tickets/:id/resume - agent-facing 执行 resume
-agentRouter.post('/tickets/:id/resume', (req, res) => runAgentTicketAction(req, res, 'resume'));
-
-// POST /tickets/:id/approve - agent-facing 执行 approve
-agentRouter.post('/tickets/:id/approve', (req, res) => runAgentTicketAction(req, res, 'approve'));
-
-// POST /tickets/:id/reject - agent-facing 执行 reject
-agentRouter.post('/tickets/:id/reject', (req, res) => runAgentTicketAction(req, res, 'reject'));
+getAgentTicketActionRouteBindings().forEach((binding) => {
+  agentRouter.post(binding.route_path, (req, res) => runAgentTicketAction(req, res, binding.action));
+});
 
 // GET /workboards/stock-tickets - 股票平台全局盘面
 agentRouter.get('/workboards/stock-tickets', (req, res) => {
@@ -3813,6 +3802,78 @@ agentRouter.get('/runtime/context', (req, res) => {
   }
 
   return res.json({ data: buildRuntimeContext({ assignment }) });
+});
+
+// GET /participants - v2 bootstrap participant registry skeleton
+agentRouter.get('/participants', (req, res) => {
+  const registry = buildParticipantRegistrySnapshot();
+  const platformId = normalizeOptionalText(req.query.platform_id, 120) || null;
+  const participantId = normalizeOptionalAgent(req.query.participant_id) || null;
+  const roleKey = normalizeOptionalText(req.query.role_key, 120) || null;
+
+  let participants = registry.participants;
+  if (platformId) {
+    const platform = registry.platforms.find((item) => item.platform_id === platformId) || null;
+    if (platform) {
+      const allowed = new Set([
+        platform.owner_agent_id,
+        platform.triage_owner_agent_id,
+        platform.review_owner_agent_id,
+        ...(platform.development_agent_ids || []),
+        ...(platform.audit_agent_ids || []),
+      ].filter(Boolean));
+      participants = participants.filter((item) => allowed.has(item.participant_id) || item.primary_platform === platformId);
+    } else {
+      participants = [];
+    }
+  }
+  if (participantId) {
+    participants = participants.filter((item) => item.participant_id === participantId);
+  }
+  if (roleKey) {
+    participants = participants.filter((item) => item.platform_roles.includes(roleKey) || item.responsibilities.includes(roleKey));
+  }
+
+  return res.json({
+    data: {
+      ...registry,
+      participants,
+      summary: {
+        ...registry.summary,
+        filtered_participants: participants.length,
+      },
+      query: {
+        platform_id: platformId,
+        participant_id: participantId,
+        role_key: roleKey,
+      },
+    },
+  });
+});
+
+// GET /participants/:participant_id - 单 participant 详情
+agentRouter.get('/participants/:participant_id', (req, res) => {
+  const participantId = normalizeOptionalAgent(req.params.participant_id);
+  const participant = participantId ? getParticipantById(participantId) : null;
+  if (!participant) {
+    return sendAgentError(req, res, 404, { error: 'Participant not found', detail: 'participant 不存在' });
+  }
+  return res.json({ data: participant });
+});
+
+// GET /routing/resolve - participant-based routing skeleton
+agentRouter.get('/routing/resolve', (req, res) => {
+  const route = resolveParticipantRoute({
+    participant_id: req.query.participant_id,
+    role_key: req.query.role_key,
+    platform_id: req.query.platform_id,
+    reason: req.query.reason,
+    intent: req.query.intent,
+    capability: req.query.capability,
+    session_kind: req.query.session_kind,
+    ticket_id: req.query.ticket_id,
+  });
+  return res.json({ data: route });
 });
 
 // GET /assignments/:assignment_id - 获取 assignment 详情
@@ -4041,6 +4102,40 @@ agentRouter.post('/assignments/:assignment_id/reports', (req, res) => {
   }
 });
 
+function buildAgentAdminCreateAuditComment(ticket, grant, payload = {}) {
+  const explicitOwners = [
+    payload.triage_owner ? `triage_owner=${payload.triage_owner}` : null,
+    payload.assigned_agent ? `assigned_agent=${payload.assigned_agent}` : null,
+    payload.review_owner ? `review_owner=${payload.review_owner}` : null,
+  ].filter(Boolean);
+
+  return {
+    id: buildCommentId(),
+    author: grant.agent_id,
+    timestamp: new Date().toISOString(),
+    content: [
+      '通过 control-ui stock admin 创建工单。',
+      explicitOwners.length > 0
+        ? `显式责任链：${explicitOwners.join(' / ')}`
+        : '责任链：未显式指定，已按 stock-platform 默认路由。',
+    ].join('\n'),
+    type: 'system',
+    visibility: 'internal',
+    thread_id: null,
+    mentions: [],
+    metadata: {
+      source: 'control-ui-stock-admin',
+      actor_role: 'agent_admin',
+      actor: grant.agent_id,
+      explicit_triage_owner: payload.triage_owner || null,
+      explicit_assigned_agent: payload.assigned_agent || null,
+      explicit_review_owner: payload.review_owner || null,
+      platform: ticket.platform || null,
+      ticket_id: ticket.id,
+    },
+  };
+}
+
 adminRouter.get('/stock-tickets', (req, res) => {
   const grant = requireAgentAdminGrant(req, res, 'stock_tickets:read');
   if (!grant) return;
@@ -4121,6 +4216,48 @@ adminRouter.get('/stock-tickets', (req, res) => {
       items: groupBy === 'none' ? pageItems : [],
       groups: groupBy === 'none' ? [] : buildStockWorkboardGroups(pageItems, groupBy),
       generated_at: new Date().toISOString(),
+    },
+  });
+});
+
+adminRouter.post('/stock-tickets', (req, res) => {
+  const grant = requireAgentAdminGrant(req, res, 'stock_tickets:create');
+  if (!grant) return;
+
+  const requestedPlatform = normalizeOptionalText(req.body?.platform, 120);
+  if (requestedPlatform && requestedPlatform !== 'stock-platform') {
+    return sendAgentError(req, res, 403, {
+      error: 'AGENT_ADMIN_SCOPE_FORBIDDEN',
+      detail: '当前 agent-admin create 仅允许创建 stock-platform 工单',
+      platform: requestedPlatform,
+      allowed_platforms: ['stock-platform'],
+    });
+  }
+
+  const prepared = prepareTicketCreatePayload({
+    ...req.body,
+    platform: 'stock-platform',
+  });
+  if (!prepared.ok) {
+    return sendAgentError(req, res, prepared.status, prepared.body);
+  }
+
+  const ticket = store.createTicket(prepared.payload);
+  const auditComment = buildAgentAdminCreateAuditComment(ticket, grant, {
+    triage_owner: normalizeOptionalAgent(req.body?.triage_owner),
+    assigned_agent: normalizeOptionalAgent(req.body?.assigned_agent ?? req.body?.agent),
+    review_owner: normalizeOptionalAgent(req.body?.review_owner),
+  });
+  persistTicketComment(ticket.id, auditComment, { preserveAudit: true });
+
+  return res.status(201).json({
+    success: true,
+    ticket: formatTicketForList(store.getTicketById(ticket.id) || ticket),
+    audit_comment: auditComment,
+    auth: {
+      role: 'agent_admin',
+      agent_id: grant.agent_id,
+      capabilities: grant.capabilities,
     },
   });
 });
@@ -4311,6 +4448,37 @@ AGENT_ROUTE_PREFIXES.forEach((prefix) => {
 });
 
 // GET /api/agent-topology - 输出当前 agent -> gateway 拓扑
+app.get('/api/v1/platform/agents', (_req, res) => {
+  res.json({ agents: store.listPlatformAgents() });
+});
+
+app.get('/api/v1/platform/capabilities', (_req, res) => {
+  res.json({ capabilities: store.listPlatformCapabilities() });
+});
+
+app.get('/api/v1/platform/role-contracts', (_req, res) => {
+  res.json({ role_contracts: store.listPlatformRoleContracts() });
+});
+
+app.get('/api/v1/platform/workflow-templates', (_req, res) => {
+  res.json({ workflow_templates: store.listPlatformWorkflowTemplates() });
+});
+
+app.post('/api/v1/platform/routing/preview', (req, res) => {
+  const input = req.body && typeof req.body === 'object' ? req.body : {};
+  const result = buildRoutingPreview(input, { agents: store.listPlatformAgents() });
+  const record = store.recordPlatformRoutingDecision({
+    request: input,
+    result,
+    routing_reason: result.reason,
+  });
+  res.json({ routing: { ...result, decision_id: record.id, created_at: record.created_at } });
+});
+
+app.get('/api/v1/platform/routing/decisions', (req, res) => {
+  res.json({ decisions: store.listPlatformRoutingDecisions({ limit: req.query.limit }) });
+});
+
 app.get('/api/agent-topology', (_req, res) => {
   res.json({ data: getAgentTopologyRegistry() });
 });
@@ -4338,6 +4506,221 @@ app.get('/api/tickets/:id/actions', (req, res) => {
       ...action,
       required_fields: getRequiredFieldsForAction(action.key),
     })),
+  });
+});
+
+// GET /api/control/tickets/:id/operational-view - 最小控制读模型（单票聚合视图）
+app.get('/api/control/tickets/:id/operational-view', (req, res) => {
+  const id = req.params.id;
+  const ticket = store.getTicketById(id);
+  if (!ticket) {
+    return res.status(404).json({ error: 'Ticket not found', message: '工单不存在' });
+  }
+  const enriched = enrichTicketForApi(ticket);
+  const workflow_mismatch = detectWorkflowMismatch(enriched);
+  const control_read_model = buildTicketControlReadModel(enriched, {
+    raw_ticket: ticket,
+    workflow_mismatch,
+    available_actions: getAvailableActions(Number(id)),
+    include_runtime_digest: true,
+  });
+  return res.json({
+    ticket_id: Number(id),
+    ...control_read_model,
+  });
+});
+
+function buildProductionBaseline() {
+  const repoRoot = path.resolve(__dirname, '..');
+  const workingDirectory = process.cwd();
+  const runtime = getRuntimeVersion();
+  const fingerprintSource = [repoRoot, workingDirectory, runtime.git_commit || '', runtime.schema_version || '', runtime.bundle_version || ''].join('|');
+  return {
+    production_repo: 'agent-ticket-system',
+    repo_root: repoRoot,
+    working_directory: workingDirectory,
+    release_fingerprint: createHash('sha256').update(fingerprintSource).digest('hex').slice(0, 16),
+    environment: 'production',
+  };
+}
+
+const REGISTRY_ROLES = [
+  { key: 'triage', label: 'Triage', enabled: true, management_only: false },
+  { key: 'executor', label: 'Executor', enabled: true, management_only: false },
+  { key: 'reviewer', label: 'Reviewer', enabled: true, management_only: false },
+  { key: 'audit', label: 'Auditor', enabled: true, management_only: false },
+  { key: 'manager', label: 'Manager', enabled: true, management_only: true },
+];
+
+const registryDomains = new Map([
+  ['ticket-platform', { key: 'ticket-platform', label: '工单平台', description: '工单生命周期与多 agent 协作平台', enabled_roles: ['triage', 'executor', 'reviewer', 'audit', 'manager'], created_by: 'system' }],
+  ['stock-platform', { key: 'stock-platform', label: '股票平台', description: '股票业务协作域', enabled_roles: ['triage', 'executor', 'reviewer', 'audit', 'manager'], created_by: 'system' }],
+]);
+const registryAgents = new Map();
+
+function normalizeRegistryKey(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function roleToResponsibility(role) {
+  const key = normalizeRegistryKey(role);
+  if (key === 'executor') return 'development';
+  if (key === 'reviewer') return 'review_owner';
+  if (key === 'manager') return 'platform_owner';
+  return key;
+}
+
+function upsertRegisteredParticipant(agent = {}) {
+  const agentId = normalizeRegistryKey(agent.agent_id);
+  if (!agentId) return null;
+  const roles = Array.isArray(agent.roles) ? agent.roles.map(normalizeRegistryKey).filter(Boolean) : [];
+  const domains = Array.isArray(agent.domains) ? agent.domains.map(normalizeRegistryKey).filter(Boolean) : [];
+  const primaryPlatform = domains[0] || null;
+  const responsibilities = [...new Set(roles.map(roleToResponsibility).filter(Boolean))];
+  const capabilities = [...new Set([
+    ...responsibilities,
+    ...roles.map((role) => `role:${role}`),
+    ...domains.map((domain) => `platform:${domain}`),
+  ])];
+  return store.upsertParticipantRegistryEntry({
+    participant_id: agentId,
+    display_name: agent.display_name || agentId,
+    participant_type: 'agent',
+    role_type: roles[0] || 'executor',
+    ownership_layer: responsibilities[0] || roles[0] || null,
+    primary_platform: primaryPlatform,
+    responsibilities,
+    collaborates_with: [],
+    responsibility_summary: `registered roles=${roles.join(',') || 'none'} domains=${domains.join(',') || 'none'}`,
+    gateway_id: agent.gateway || agent.gateway_id || null,
+    source_kind: 'agent_registration',
+    capabilities,
+    status: {
+      availability_status: agent.status === 'offline' ? 'unavailable' : 'active',
+      eligibility_status: 'eligible',
+      accepts_assignment_types: roles,
+      metadata: { capacity: agent.capacity ?? null, priority: agent.priority ?? null, session_binding: agent.session_binding || null },
+    },
+  });
+}
+
+app.get('/health', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'ticket-platform-v2',
+    status: 'healthy',
+    request_id: getRequestId(req, res),
+    runtime_version: getRuntimeVersion(),
+    production_baseline: buildProductionBaseline(),
+  });
+});
+
+app.get('/api/v1/platform/describe', (_req, res) => {
+  res.json({
+    data: {
+      platform: 'ticket-platform-v2',
+      contract_version: '2026-03-role-domain-registry-v1',
+      production_baseline: buildProductionBaseline(),
+      apis: {
+        list_roles: '/api/v1/registry/roles',
+        list_domains: '/api/v1/registry/domains',
+        register_agent: '/api/v1/registry/agents/register',
+        heartbeat: '/api/v1/registry/agents/heartbeat',
+        resolve_assignment: '/api/v1/registry/resolve',
+      },
+      roles: REGISTRY_ROLES,
+      domains: [...registryDomains.values()],
+      defaults: {
+        capabilities: DEFAULT_PLATFORM_CAPABILITIES.length,
+        agents: DEFAULT_PLATFORM_AGENTS.length,
+        role_contracts: DEFAULT_ROLE_CONTRACTS.length,
+        workflow_templates: DEFAULT_WORKFLOW_TEMPLATES.length,
+      },
+    },
+  });
+});
+
+app.get('/api/v1/registry/roles', (_req, res) => {
+  res.json({ data: REGISTRY_ROLES });
+});
+
+app.get('/api/v1/registry/domains', (_req, res) => {
+  res.json({ data: [...registryDomains.values()] });
+});
+
+app.post('/api/v1/registry/domains', (req, res) => {
+  if (String(req.get('X-Platform-Token') || '') !== 'dev-platform-token') {
+    return sendAgentError(req, res, 401, { error: 'Unauthorized', detail: 'X-Platform-Token 无效或缺失' });
+  }
+  const key = normalizeRegistryKey(req.body?.key);
+  if (!key) return sendAgentError(req, res, 400, { error: 'Bad request', detail: 'domain key 必填' });
+  const domain = {
+    key,
+    label: normalizeOptionalText(req.body?.label, 120) || key,
+    description: normalizeOptionalText(req.body?.description, 1000) || '',
+    enabled_roles: Array.isArray(req.body?.enabled_roles) ? req.body.enabled_roles.map(normalizeRegistryKey).filter(Boolean) : [],
+    created_by: 'leoss',
+  };
+  registryDomains.set(key, domain);
+  res.status(201).json({ data: domain });
+});
+
+app.post('/api/v1/registry/agents/register', (req, res) => {
+  const agentId = normalizeRegistryKey(req.body?.agent_id);
+  if (!agentId) return sendAgentError(req, res, 400, { error: 'Bad request', detail: 'agent_id 必填' });
+  const agent = {
+    agent_id: agentId,
+    display_name: normalizeOptionalText(req.body?.display_name, 120) || agentId,
+    roles: Array.isArray(req.body?.roles) ? req.body.roles.map(normalizeRegistryKey).filter(Boolean) : [],
+    domains: Array.isArray(req.body?.domains) ? req.body.domains.map(normalizeRegistryKey).filter(Boolean) : [],
+    gateway: normalizeOptionalText(req.body?.gateway || req.body?.gateway_id, 120) || null,
+    session_binding: normalizeOptionalText(req.body?.session_binding, 255) || null,
+    capacity: Number(req.body?.capacity ?? 1),
+    priority: Number(req.body?.priority ?? 100),
+    status: normalizeOptionalText(req.body?.status, 60) || 'online',
+    active_load: Number(req.body?.active_load ?? 0),
+    registered_at: new Date().toISOString(),
+  };
+  registryAgents.set(agentId, agent);
+  upsertRegisteredParticipant(agent);
+  res.json({ data: agent });
+});
+
+app.post('/api/v1/registry/agents/heartbeat', (req, res) => {
+  const agentId = normalizeRegistryKey(req.body?.agent_id);
+  if (!agentId) return sendAgentError(req, res, 400, { error: 'Bad request', detail: 'agent_id 必填' });
+  const existing = registryAgents.get(agentId) || { agent_id: agentId, roles: [], domains: [] };
+  const agent = {
+    ...existing,
+    status: normalizeOptionalText(req.body?.status, 60) || existing.status || 'online',
+    active_load: Number(req.body?.active_load ?? existing.active_load ?? 0),
+    capacity: Number(req.body?.capacity ?? existing.capacity ?? 1),
+    metadata: req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : existing.metadata || {},
+    last_heartbeat: new Date().toISOString(),
+  };
+  registryAgents.set(agentId, agent);
+  upsertRegisteredParticipant(agent);
+  res.json({ data: agent });
+});
+
+app.post('/api/v1/registry/resolve', (req, res) => {
+  const domainKey = normalizeRegistryKey(req.body?.domain);
+  const requiredRole = normalizeRegistryKey(req.body?.required_role || req.body?.role);
+  const domain = registryDomains.get(domainKey) || null;
+  const candidates = [...registryAgents.values()].filter((agent) => (
+    (!domainKey || agent.domains?.includes(domainKey))
+    && (!requiredRole || agent.roles?.includes(requiredRole))
+    && agent.status !== 'offline'
+  )).sort((a, b) => (Number(b.priority || 0) - Number(a.priority || 0)) || String(a.agent_id).localeCompare(String(b.agent_id)));
+  const selected = candidates[0] || null;
+  res.json({
+    data: {
+      resolved_agent: selected?.agent_id || null,
+      requested: { domain: domainKey || null, required_role: requiredRole || null },
+      domain,
+      candidates,
+      reason: selected ? 'role+domain matched registered agent' : 'no role+domain matched registered agent',
+    },
   });
 });
 

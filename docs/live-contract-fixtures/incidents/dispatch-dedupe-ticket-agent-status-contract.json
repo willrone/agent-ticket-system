@@ -1,0 +1,39 @@
+{
+  "fixture_id": "dispatch-dedupe-ticket-agent-status-contract",
+  "fixture_type": "dispatch-dedupe-contract",
+  "version": "v1",
+  "summary": "固化 dispatch/notify 去重不能退化成 ticket+agent+status 粗粒度；至少要保留 stage + reason + actor 语义。",
+  "source_refs": [
+    "docs/API.md",
+    "api/app.test.js",
+    "api/app.js"
+  ],
+  "expected": {
+    "dispatch_dedupe_contract": "dispatch:${stage}:${reason}:${actor}",
+    "notify_dedupe_contract": "notify:${stage}:${reason}:${actor}",
+    "must_distinguish": [
+      "assignment",
+      "workflow_mismatch",
+      "nudge_manual",
+      "nudge_stale_running_notify_only"
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "running_assignment",
+      "dedupe_key": "dispatch:running:assignment:beavy"
+    },
+    {
+      "case_id": "running_workflow_mismatch",
+      "dedupe_key": "dispatch:running:workflow_mismatch:荣晖:decision_required"
+    },
+    {
+      "case_id": "pending_decision_notify",
+      "dedupe_key": "notify:pending_decision:decision_required:荣晖"
+    }
+  ],
+  "historical_wrong_behavior": [
+    "去重只按 ticket+agent+status，导致不同 reason 的 ready 事件互相吞掉。",
+    "workflow_mismatch/nudge/assignment 被压成同一个 ready 项，真实责任链与补派时机丢失。"
+  ]
+}

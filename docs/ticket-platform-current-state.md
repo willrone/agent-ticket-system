@@ -54,7 +54,12 @@ If code changes the platform behavior, this document must be updated in the same
 - dispatch poller
 - notify poller
 - agent-facing API (`/api/v1/agent/*`)
-- frontend views (Dashboard / Tickets / Kanban / TicketDetail)
+- frontend views (Dashboard / Tickets / Inbox / Kanban / TicketDetail)
+
+### Parent / child aggregate closeout surface
+- `TicketDetail` 已展示母单 `子单汇总` 卡片：状态分布、最近完成时间、blocked/failed 风险信号、未闭环子单列表。
+- `GET /api/tickets/:id` 会返回 `parent_summary`（兼容 `parent_child_summary`）；`GET /api/tickets/:id/children` 会返回同一份聚合汇总 + 子单列表。
+- 父单收口守卫仍以 live state machine 为准：只要子单未全部进入 terminal（`complete / failed / deprecated`），reviewer `approve/reject` 会被 409 guard 阻止。
 
 ---
 
@@ -183,6 +188,18 @@ The current live platform exposes agent-facing ticket actions such as:
 - approve
 - reject
 
+### Agent-facing action matrix baseline
+Reviewer 不应只看“有没有 ticket_actions 字段”，还要核对 **status -> available reviewer-facing actions** 是否一致。
+
+当前仓库已把这一层 baseline 固化到两处：
+- 前端共享 fixture：`src/test/frontend-acceptance-fixtures.js#FRONTEND_ACCEPTANCE_AGENT_ACTION_MATRIX`
+- live hosted runtime fixture：`fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-runtime-context.json`
+
+约束：
+- baseline 只覆盖 reviewer / agent-facing 主链路动作：`queue / start_work / pause / resume / approve / reject`
+- parity 测试必须同时对齐 `workflow-schema.js -> listAvailableActionsForStatus()` 与 hosted runtime `ticket_actions`
+- 不把 `request_decision` / `block` / `fail` / `handoff` / `formal_reassign` / `management_only` 动作混进这份 reviewer-facing baseline，避免把“全量 transition 能力”误当成“前端/验收主基线”
+
 ---
 
 ## 4. Dispatch / notify runtime model
@@ -240,12 +257,12 @@ The platform is not missing review entirely; it already supports reviewer-orient
 - `review_owner`
 - approve / reject / pause / resume style actions
 - hosted playbook guidance that reviewers should use agent-facing action APIs rather than ad-hoc transition/comment writes
+- human console inbox APIs: `/api/inbox/review`、`/api/inbox/decisions`
+- 独立 Inbox 页面（Review / Decision tabs），并按 SLA 剩余时间最紧急优先排序
 
 ### What is still weak
-- review inbox productization
 - consolidated review summary presentation
-- smoother reviewer decision UX
-- better visibility for “needs boss decision” vs “reviewer can decide now”
+- smoother reviewer decision UX（详情页侧仍可继续打磨）
 
 ---
 
@@ -384,7 +401,37 @@ If any of the above is missing, the change is not fully complete.
 
 ---
 
-## 10. Documentation policy
+## 10. Repository hygiene / documentation governance
+
+### Generated artifact policy
+The repository now treats the following as **generated artifacts**, not durable source-of-truth assets:
+- `api/data/test-*.db*`
+- `api/data/legacy-*.db*`
+- `data/agent-ticket-system.db*` (accidental local clone / migration byproduct)
+- `.rollout/`
+- sqlite sidecars such as `*.db-shm` / `*.db-wal` (including `data/backups/*.db-shm|*.db-wal`)
+
+Allowed durable SQLite assets are intentionally narrower:
+- live runtime DB (`data/tickets.db`) when the local platform depends on it
+- explicitly retained manual backups under `data/backups/` when they are part of operator recovery workflow
+
+Reviewers should treat any large wave of `api/data/test-*` / `legacy-*` files in git status as repository hygiene debt, not as meaningful product change.
+
+### Documentation stratification
+Current document roles are:
+- `README.md` → repo entrypoint / operator & developer quickstart
+- `docs/API.md` → platform-level API overview and cross-role routes
+- `docs/reference/api.md` → canonical agent-facing contract
+- `docs/ticket-platform-current-state.md` → live/runtime truth snapshot
+- `docs/ticket-platform-gap-analysis-and-plan.md` → design debt / roadmap / not-yet-live plan
+- `docs/ticket-platform-doc-maintenance-policy.md` → reviewer gate for doc sync
+
+Reviewer expectation:
+- do not approve by reading only README or only a plan doc
+- distinguish current live contract from future design intent
+- if code changes repo hygiene expectations or document ownership boundaries, update the relevant formal docs in the same change
+
+## 11. Documentation policy
 
 This repository must keep ticket-platform documentation in sync with runtime behavior.
 

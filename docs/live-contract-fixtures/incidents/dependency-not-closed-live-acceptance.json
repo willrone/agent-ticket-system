@@ -1,0 +1,26 @@
+{
+  "fixture_id": "dependency-not-closed-live-acceptance",
+  "fixture_type": "live-acceptance-dependency-gate",
+  "version": "v1",
+  "summary": "固化依赖未闭合时 live acceptance 必须给出 dependency-not-closed verdict，不能误判为 ready 可收口。",
+  "source_refs": [
+    "api/app.test.js",
+    "docs/reference/api.md",
+    "docs/API.md"
+  ],
+  "expected": {
+    "verdict": "dependency-not-closed",
+    "blocking_dependency_required": true,
+    "should_block_final_acceptance": true,
+    "dependency_snapshot_fields": [
+      "ticket_id",
+      "status",
+      "blocking",
+      "satisfied"
+    ]
+  },
+  "historical_wrong_behavior": [
+    "主 ticket 仍有 blocks 依赖未闭合，却被当成 ready/done 继续往下派发或验收。",
+    "reviewer 只能靠人工翻 comments/children 判断依赖是否满足，live acceptance 没有机器可读 gate。"
+  ]
+}

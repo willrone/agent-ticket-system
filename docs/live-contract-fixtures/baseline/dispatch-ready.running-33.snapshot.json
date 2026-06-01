@@ -1,0 +1,48 @@
+{
+  "fixture_id": "dispatch-ready-running-33-snapshot",
+  "fixture_type": "dispatch-ready-snapshot",
+  "version": "v1",
+  "summary": "冻结 2026-03-15 live baseline 中 #33 running assignment 的 dispatch ready 断面，作为后续 live/repo contract 对比入口。",
+  "source_refs": [
+    "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/capture-manifest.json",
+    "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/dispatch-ready.json",
+    "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-assignment-running-33.json",
+    "api/app.test.js",
+    "docs/API.md"
+  ],
+  "captured_from": {
+    "batch": "ticket-platform-live/2026-03-15T1115+08-baseline",
+    "ticket_id": 33,
+    "assignment_id": "asg_20260315031256_33_beavy_hem2"
+  },
+  "expected": {
+    "should_be_ready": true,
+    "should_require_receipt": true,
+    "stage": "running",
+    "agent": "beavy",
+    "ready_entry_contract": [
+      "dispatch_id",
+      "ticket_id",
+      "agent",
+      "target_session_key",
+      "target_gateway_id",
+      "transport",
+      "dedupe_key",
+      "reason",
+      "escalation_tier"
+    ]
+  },
+  "ready_entry_snapshot": {
+    "dispatch_id": 329,
+    "ticket_id": 33,
+    "status": "running",
+    "agent": "beavy",
+    "assignment_id": "asg_20260315031256_33_beavy_hem2",
+    "dedupe_key": "dispatch:running:assignment:beavy",
+    "reason": "running"
+  },
+  "historical_wrong_behavior": [
+    "queued -> running 已桥接，但 successor running assignment 没有补成可消费的 dispatch ready entry。",
+    "live 有 assignment，agent 却拿不到继续回写的 running contract，导致 stale assignment 与无入口并存。"
+  ]
+}

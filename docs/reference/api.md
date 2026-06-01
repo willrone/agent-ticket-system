@@ -35,6 +35,9 @@ agent 在收到 assignment 后，应当仅依赖平台下发的 contract 完成�
 ### Canonical
 - `/api/v1/agent/workflow/schema`
 - `/api/v1/agent/runtime/context`
+- `/api/v1/agent/participants`
+- `/api/v1/agent/participants/:participant_id`
+- `/api/v1/agent/routing/resolve`
 - `/api/v1/agent/assignments/:assignment_id`
 - `/api/v1/agent/assignments/:assignment_id/dependencies`
 - `/api/v1/agent/assignments/:assignment_id/comments`
@@ -171,7 +174,31 @@ agent 在收到 assignment / dispatch 后，推荐固定按下列顺序启动：
 1. **先核 version / runtime contract**：调用 `GET /api/version`，确认 `git_commit` / `schema_version` / `bundle_version` 与预期一致；live acceptance 响应中的 `live_surfaces.runtime_version` 或 `live.runtime_version` 应与 `/api/version` 一致。
 2. 再按需做 bundle 预期版本、workflow schema、dependency、delivery health 等校验。
 
+### Parent / Child aggregate read model
+- `GET /api/tickets/:id`：当工单为母单时，详情会返回 `parent_summary`（与 `parent_child_summary` 等价），包含 `child_count / by_status / latest_completed_at / blocked_child_count / failed_child_count / attention_required / blocking_children`。
+- `GET /api/tickets/:id/children`：返回 `{ ticket_id, summary, items }`，其中 `summary` 为同一份父子聚合读模型，`items` 为子单详情列表。
+- closeout guard 仍以 workflow/state machine 为准：只要存在非 terminal 子单，`approve/reject` 会收到 `409 PARENT_CLOSEOUT_CHILDREN_INCOMPLETE`。
+
 ---
+
+## 5.2 Human console inbox surfaces
+
+以下为控制台 / reviewer UI 使用的人类侧收件箱接口（非 agent-facing，不使用 assignment token）：
+
+### GET /api/inbox/review
+- 返回 `done` / `review` 工单
+- 排序：按 `sla_remaining_ms` 升序（越小越紧急）
+- 用途：独立 Review Inbox 页面 / reviewer 收口列表
+
+### GET /api/inbox/decisions
+- 返回 `pending_decision` 工单
+- 排序：按 `sla_remaining_ms` 升序（越小越紧急）
+- 用途：独立 Decision Inbox 页面 / boss decision 列表
+
+返回对象在 ticket list DTO 基础上附加：
+- `inbox_lane`: `review` | `decision`
+- `sla_remaining_ms`
+- `sla_remaining_minutes`
 
 ## 6. 核心读取接口
 
@@ -193,6 +220,44 @@ agent 在收到 assignment / dispatch 后，推荐固定按下列顺序启动：
 - `playbook_ref`
 - `ticket_actions`
 - `workboards`
+- `feature_flags.participant_registry_api`
+- `feature_flags.participant_route_resolve_api`
+
+bootstrap 最小基线（v2 bootstrap 首轮新增）：
+- `bootstrap.participant_registry` → `/api/v1/agent/participants`
+- `bootstrap.participant_route_resolve` → `/api/v1/agent/routing/resolve`
+
+### GET /api/v1/agent/participants
+读取 participant registry 快照；把现有 `agent-topology` 中的 agent/platform/gateway 目录收口成 agent-facing bootstrap contract。
+
+常见 query：
+- `platform_id`
+- `participant_id`
+- `role_key`
+
+关键返回字段：
+- `participants[]`
+- `platforms[]`
+- `routing_roles[]`
+- `summary.total_participants / filtered_participants`
+
+### GET /api/v1/agent/participants/:participant_id
+读取单个 participant 的最小责任视图（display / role / gateway / platform_roles）。
+
+### GET /api/v1/agent/routing/resolve
+participant-based routing skeleton。用于先把“我要找谁”解析成稳定 contract，而不是让 caller 自己猜 `triage_owner / review_owner / development_agent_ids[0]`。
+
+常见 query：
+- `participant_id`
+- `platform_id`
+- `role_key`
+- `reason`
+
+关键返回字段：
+- `resolved.participant_id`
+- `gateway.id / transport`
+- `route_target`
+- `explain.resolution_source`
 
 ### GET /api/v1/agent/assignments/:assignment_id
 关键字段：
@@ -351,12 +416,15 @@ agent 不需要直接写 transition API。
 约束：
 - 只能创建 `triage`
 - 不允许通过 create 直接创建 `queued/running/done/complete`
-- `assigned_agent` 只能留空或等于 `actor`
-- 不允许直接覆盖 `triage_owner/review_owner/decision_owner/next_actor`
+- `triage_owner` / `assigned_agent` / `review_owner` 可在 agent-facing create 显式指定；留空时按平台默认责任链回退
+- 仍不允许直接覆盖 `decision_owner` / `next_actor`（以及 `review_plan` / `review_state` 等平台收口字段）
+- `platform=ticket-platform` 时，`assigned_agent` / `target_agent` 仍只允许 `beavy`
 
 说明：
 - triage -> queue 须责任链已落链：工单须具备 `assigned_agent`、`review_owner`；缺一则 `POST /api/tickets/:id/transition` action=queue 返回 409，错误码 `TRIAGE_QUEUE_CHAIN_INCOMPLETE`。
-- `review_owner` 是平台级显式字段，但仅对 human/console `POST /api/tickets` 与 `PATCH /api/tickets/:id` 开放；agent-facing create 仍禁止直接覆盖，避免绕过 single-writer 的 reviewer 路由控制。
+- `triage_owner` 未显式提供时，默认按平台路由：`stock-platform -> cowder`，其余平台默认 `leoss`。
+- `review_owner` 未显式提供时，默认回退到 `triage_owner`；工单进入 `done/review` 时，reviewer routing / dispatch 也会按该字段接管。
+- `decision_owner` / `next_actor` 仍由平台 single writer 统一推导与收口，避免 agent-facing create 绕过 workflow 责任链。
 
 ### POST /api/v1/agent/tickets/:id/pause
 用途：对当前 ticket 执行 workflow `pause`。

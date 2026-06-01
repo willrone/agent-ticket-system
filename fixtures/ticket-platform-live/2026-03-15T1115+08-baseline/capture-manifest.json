@@ -1,0 +1,117 @@
+{
+  "captured_at": "2026-03-15T11:14:07.447201+08:00",
+  "items": [
+    {
+      "name": "agent-skills-current",
+      "path": "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-skills-current.json",
+      "endpoint": "/api/v1/agent/skills/current",
+      "status": 200,
+      "captured_at": "2026-03-15T11:14:07.413139+08:00",
+      "request_id": "87d3c56a-630b-4cbd-819d-8d92f8b37ca9",
+      "sha256": "af7303c81a9ab0554e5f042b1489edf2d0832954df5edbe44d1127329a06c29a",
+      "bytes": 102735,
+      "headers": {
+        "X-Request-Id": "87d3c56a-630b-4cbd-819d-8d92f8b37ca9",
+        "Content-Type": "application/json; charset=utf-8"
+      }
+    },
+    {
+      "name": "agent-playbook-ticket-handler",
+      "path": "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-playbook-ticket-handler.json",
+      "endpoint": "/api/v1/agent/playbooks/ticket-handler",
+      "status": 200,
+      "captured_at": "2026-03-15T11:14:07.415810+08:00",
+      "request_id": "c614d678-94b3-4767-ab0f-f42d11c9df01",
+      "sha256": "af7303c81a9ab0554e5f042b1489edf2d0832954df5edbe44d1127329a06c29a",
+      "bytes": 102735,
+      "headers": {
+        "X-Request-Id": "c614d678-94b3-4767-ab0f-f42d11c9df01",
+        "Content-Type": "application/json; charset=utf-8"
+      }
+    },
+    {
+      "name": "agent-runtime-context",
+      "path": "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-runtime-context.json",
+      "endpoint": "/api/v1/agent/runtime/context",
+      "status": 200,
+      "captured_at": "2026-03-15T11:14:07.417507+08:00",
+      "request_id": "c824d871-a91e-423e-af1b-898d712717d6",
+      "sha256": "209522b36d56cb7a943cf9176c63343b2cf515b71751bf16b5e2c939479ccfd4",
+      "bytes": 32525,
+      "headers": {
+        "X-Request-Id": "c824d871-a91e-423e-af1b-898d712717d6",
+        "Content-Type": "application/json; charset=utf-8"
+      }
+    },
+    {
+      "name": "agent-assignment-running-33",
+      "path": "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-assignment-running-33.json",
+      "endpoint": "/api/v1/agent/assignments/asg_20260315031256_33_beavy_hem2",
+      "status": 200,
+      "captured_at": "2026-03-15T11:14:07.420559+08:00",
+      "request_id": "b035c0dc-2353-4bb4-a4bc-3e7da76eae7f",
+      "sha256": "ba6b38eb0fc62ed032e303494f86b60f880e9666b5a7bc5fb744d928595f458d",
+      "bytes": 53825,
+      "headers": {
+        "X-Request-Id": "b035c0dc-2353-4bb4-a4bc-3e7da76eae7f",
+        "Content-Type": "application/json; charset=utf-8"
+      }
+    },
+    {
+      "name": "ticket-33",
+      "path": "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/ticket-33.json",
+      "endpoint": "/api/tickets/33",
+      "status": 200,
+      "captured_at": "2026-03-15T11:14:07.421756+08:00",
+      "request_id": "171c089e-eb2b-4ca9-bf15-e7e835f5d958",
+      "sha256": "e2187d2deefa2112487ceb433f472bb2fd6dfb3bf74ef977e5228272d51187fa",
+      "bytes": 8081,
+      "headers": {
+        "X-Request-Id": "171c089e-eb2b-4ca9-bf15-e7e835f5d958",
+        "Content-Type": "application/json; charset=utf-8"
+      }
+    },
+    {
+      "name": "dispatch-ready",
+      "path": "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/dispatch-ready.json",
+      "endpoint": "/api/dispatch/ready",
+      "status": 200,
+      "captured_at": "2026-03-15T11:14:07.435886+08:00",
+      "request_id": "d6c8f1b6-02d5-46e2-9c08-1f146429f9bb",
+      "sha256": "82afddaff8afb385b8ee0e36528563cb4a30f2473521eb139f6044f49d1927a0",
+      "bytes": 55925,
+      "headers": {
+        "X-Request-Id": "d6c8f1b6-02d5-46e2-9c08-1f146429f9bb",
+        "Content-Type": "application/json; charset=utf-8"
+      }
+    },
+    {
+      "name": "notifications-ready",
+      "path": "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/notifications-ready.json",
+      "endpoint": "/api/notifications/ready",
+      "status": 200,
+      "captured_at": "2026-03-15T11:14:07.445359+08:00",
+      "request_id": "8c378569-f37a-4e1e-bcb6-b5fe8b889409",
+      "sha256": "78577e64604121d54da7e19737137ec74522ef281a86361ef418c2e719cdacbe",
+      "bytes": 12,
+      "headers": {
+        "X-Request-Id": "8c378569-f37a-4e1e-bcb6-b5fe8b889409",
+        "Content-Type": "application/json; charset=utf-8"
+      }
+    },
+    {
+      "name": "agent-workflow-schema",
+      "path": "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-workflow-schema.json",
+      "endpoint": "/api/v1/agent/workflow/schema",
+      "status": 200,
+      "captured_at": "2026-03-15T11:14:07.447166+08:00",
+      "request_id": "bb70ccd4-6a47-40e1-8a22-da0e007a0a53",
+      "sha256": "9020462f3e5d26497ee2e9a20dd80ca1a5fa92516af7e3b083ad259d03432729",
+      "bytes": 26829,
+      "headers": {
+        "X-Request-Id": "bb70ccd4-6a47-40e1-8a22-da0e007a0a53",
+        "Content-Type": "application/json; charset=utf-8"
+      }
+    }
+  ]
+}

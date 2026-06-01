@@ -160,4 +160,49 @@ describe('workflow-mismatch', () => {
     expect(m.category).toBe('external_blocked');
     expect(m.reason).toContain('外部阻塞');
   });
+
+  it('running + 最新 system 审计回写不应覆盖较早的正常 agent 评论', () => {
+    const ticket = {
+      id: 12,
+      status: 'running',
+      triage_owner: 'leoss',
+      review_owner: 'leoss',
+      assigned_agent: 'beavy',
+      comments: [
+        { content: '已完成实现与测试，准备收口', type: 'progress', timestamp: '2025-01-02T00:00:00Z' },
+        { content: '【审计回写】建议仅提醒继续推进，未见外部依赖或阻塞证据', type: 'system', timestamp: '2025-01-03T00:00:00Z' },
+      ],
+    };
+    expect(detectWorkflowMismatch(ticket)).toBeNull();
+  });
+
+  it('running + 实现说明里的 current context/上下文 文案不应误判为 context_gap', () => {
+    const ticket = {
+      id: 13,
+      status: 'running',
+      triage_owner: 'leoss',
+      review_owner: 'leoss',
+      assigned_agent: 'beavy',
+      comments: [
+        { content: '实现时请优先修正 current context 选择逻辑，并展示 context latest active time', type: 'progress', timestamp: '2025-01-03T00:00:00Z' },
+      ],
+    };
+    expect(detectWorkflowMismatch(ticket)).toBeNull();
+  });
+
+  it('running + 最新评论明确已拍板并继续推进时，不应再因决策词误报 mismatch', () => {
+    const ticket = {
+      id: 14,
+      status: 'running',
+      triage_owner: 'leoss',
+      review_owner: 'leoss',
+      decision_owner: '荣晖',
+      assigned_agent: 'cowder',
+      comments: [
+        { content: '需要老大拍板，是否继续推进', type: 'decision', timestamp: '2025-01-02T00:00:00Z' },
+        { content: '当前阶段核实：本票已由老大明确拍板；上一条 decision 评论用于记录授权结论，不代表工单仍处于待决策。#37 现阶段应保持 running，并继续推进。', type: 'progress', timestamp: '2025-01-03T00:00:00Z' },
+      ],
+    };
+    expect(detectWorkflowMismatch(ticket)).toBeNull();
+  });
 });

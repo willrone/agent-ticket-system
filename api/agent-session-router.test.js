@@ -3,7 +3,7 @@
  * 平台直驱：agent -> sessionKey 路由
  */
 import { describe, it, expect } from 'vitest';
-import { getDispatchSessionKeyForTicket, getNotificationSessionKey, getSessionKeyForAgent, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
+import { getDispatchSessionKeyForTicket, getNotificationSessionKey, getSessionKeyForAgent, NOTIFY_MAIN_SESSION, isHumanPrincipal } from './agent-session-router.js';
 
 describe('agent-session-router (direct-drive)', () => {
   it('NOTIFY_MAIN_SESSION 为老大主会话直连 session', () => {
@@ -30,17 +30,19 @@ describe('agent-session-router (direct-drive)', () => {
     expect(getSessionKeyForAgent('LEOSS')).toBe('agent:main:main');
   });
 
-  it('未知 agent（如 workflow_mismatch 荣晖）回退到 agent:main:main', () => {
-    expect(getSessionKeyForAgent('荣晖')).toBe('agent:main:main');
-    expect(getSessionKeyForAgent('unknown')).toBe('agent:main:main');
+  it('人类主体（如荣晖）固定回主会话，不再伪装成 agent session', () => {
+    expect(isHumanPrincipal('荣晖')).toBe(true);
+    expect(isHumanPrincipal('ronghui')).toBe(true);
+    expect(getSessionKeyForAgent('荣晖')).toBe(NOTIFY_MAIN_SESSION);
+    expect(getDispatchSessionKeyForTicket('荣晖', 26)).toBe(NOTIFY_MAIN_SESSION);
   });
 
-  it('未知 agent 的 dispatch ticket session 回退到 agent:main:ticket:<id>', () => {
-    expect(getDispatchSessionKeyForTicket('荣晖', 26)).toBe('agent:main:ticket:26');
+  it('未知 agent 回退到 agent:main:main / agent:main:ticket:<id>', () => {
+    expect(getSessionKeyForAgent('unknown')).toBe('agent:main:main');
     expect(getDispatchSessionKeyForTicket('unknown', 9)).toBe('agent:main:ticket:9');
   });
 
-  it('空值回退到 NOTIFY_MAIN_SESSION', () => {
+  it('空值回退到 agent:main:main', () => {
     expect(getSessionKeyForAgent('')).toBe('agent:main:main');
     expect(getSessionKeyForAgent(null)).toBe('agent:main:main');
     expect(getSessionKeyForAgent(undefined)).toBe('agent:main:main');
@@ -54,8 +56,10 @@ describe('agent-session-router (direct-drive)', () => {
       .toBe('agent:beavy:ticket:26');
   });
 
-  it('pending_decision/complete/failed 通知继续路由到主会话', () => {
+  it('pending_decision/blocked/complete/failed 通知继续路由到主会话', () => {
     expect(getNotificationSessionKey({ status: 'pending_decision', reviewOwner: 'leoss', ticketId: 31 }))
+      .toBe(NOTIFY_MAIN_SESSION);
+    expect(getNotificationSessionKey({ status: 'blocked', reviewOwner: 'beavy', ticketId: 26 }))
       .toBe(NOTIFY_MAIN_SESSION);
     expect(getNotificationSessionKey({ status: 'complete', reviewOwner: 'beavy', ticketId: 26 }))
       .toBe(NOTIFY_MAIN_SESSION);

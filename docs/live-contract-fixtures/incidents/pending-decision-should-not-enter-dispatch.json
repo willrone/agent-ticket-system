@@ -1,0 +1,21 @@
+{
+  "fixture_id": "pending-decision-should-not-enter-dispatch",
+  "fixture_type": "notify-only-stage-fixture",
+  "version": "v1",
+  "summary": "固化 pending_decision 只进 notifications ready、不进 dispatch ready 的阶段边界。",
+  "source_refs": [
+    "api/sheeply-e2e.test.js",
+    "api/app.test.js",
+    "docs/API.md"
+  ],
+  "expected": {
+    "status": "pending_decision",
+    "should_appear_in_dispatch_ready": false,
+    "should_appear_in_notifications_ready": true,
+    "notify_dedupe_key": "notify:pending_decision:decision_required:<actor>"
+  },
+  "historical_wrong_behavior": [
+    "pending_decision 被误投到 dispatch ready，执行位继续收到“开工”语义而不是决策通知。",
+    "通知和派单共用一套 ticket 级去重，导致 pending_decision 提示被 reviewer/done 事件覆盖。"
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "fixture_id": "terminal-stage-should-not-enter-dispatch",
+  "fixture_type": "dispatch-vs-notify-boundary",
+  "version": "v1",
+  "summary": "冻结 complete/failed 等终态阶段不能误进 dispatch ready，而应进入 notifications ready 的 contract。",
+  "source_refs": [
+    "docs/API.md",
+    "api/app.test.js",
+    "api/sheeply-e2e.test.js"
+  ],
+  "expected": {
+    "dispatch_ready_forbidden_statuses": [
+      "complete",
+      "failed",
+      "pending_decision",
+      "blocked"
+    ],
+    "notifications_ready_allowed_statuses": [
+      "complete",
+      "failed",
+      "pending_decision",
+      "blocked"
+    ],
+    "target_actor_policy": "pending_decision/blocked 优先回主控或 owner，不继续派给远端执行位"
+  },
+  "cases": [
+    {
+      "status": "complete",
+      "should_appear_in_dispatch_ready": false,
+      "should_appear_in_notifications_ready": true,
+      "reason": "terminal_notification"
+    },
+    {
+      "status": "failed",
+      "should_appear_in_dispatch_ready": false,
+      "should_appear_in_notifications_ready": true,
+      "reason": "terminal_notification"
+    }
+  ],
+  "historical_wrong_behavior": [
+    "complete/failed 误被继续派回执行位，造成终态重复派单。",
+    "dispatch/notify 边界被写成按 ticket 粗粒度判断，终态和 reviewer 主交接混淆。"
+  ]
+}

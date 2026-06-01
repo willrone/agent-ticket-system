@@ -122,6 +122,22 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
 
 ---
 
+### GET /api/control/tickets/:id/operational-view
+
+**描述**：最小控制读模型（单票聚合视图）。只读，返回 `responsibility_view`、`ticket_operational_view`、`execution_guard_view`，与详情页 `control_read_model` 一致，供控制台/大盘消费。
+
+**响应**：
+```json
+{
+  "ticket_id": 1,
+  "responsibility_view": { "chain": [...], "current_actor": "...", "current_actor_source": "...", "summary": "..." },
+  "ticket_operational_view": { "ticket_id": 1, "title": "...", "status": "...", "bucket": "active", "latest_comment_summary": null, "latest_report_type": null, "worker_stats": null, "reservation": null, "execution_mode": "direct", "audit_flags": [], "parent_child_summary": null },
+  "execution_guard_view": { "requires_worker": false, "has_worker_evidence": false, "available_actions": ["queue", "pause", ...] }
+}
+```
+
+---
+
 ### GET /tickets/:id/actions
 
 **描述**：获取工单当前可执行的 actions
@@ -143,6 +159,50 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
 ---
 
 ## 工单 CRUD API
+
+### GET /inbox/review
+
+**描述**：获取 reviewer 收口收件箱，当前包含 `done` / `review` 状态工单，按 **SLA 剩余时间最紧急优先** 排序。
+
+**响应**：
+```json
+{
+  "items": [
+    {
+      "id": 12,
+      "title": "Ready for reviewer closeout",
+      "status": "done",
+      "inbox_lane": "review",
+      "review_owner": "leoss",
+      "next_actor": "leoss",
+      "sla_remaining_ms": 300000,
+      "sla_remaining_minutes": 5
+    }
+  ]
+}
+```
+
+### GET /inbox/decisions
+
+**描述**：获取决策收件箱，当前包含 `pending_decision` 状态工单，按 **SLA 剩余时间最紧急优先** 排序。
+
+**响应**：
+```json
+{
+  "items": [
+    {
+      "id": 21,
+      "title": "Need boss decision",
+      "status": "pending_decision",
+      "inbox_lane": "decision",
+      "decision_owner": "荣晖",
+      "next_actor": "荣晖",
+      "sla_remaining_ms": -600000,
+      "sla_remaining_minutes": -10
+    }
+  ]
+}
+```
 
 ### GET /tickets
 
@@ -173,7 +233,7 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
 
 ### GET /tickets/:id
 
-**描述**：获取工单详情
+**描述**：获取工单详情。响应中包含 **control_read_model**（最小控制读模型），便于单票一眼看清责任链、阶段/动作、worker gate、reservation/latest report 摘要。
 
 **响应**：
 ```json
@@ -192,7 +252,53 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
   "decision_summary": null,
   "comments": [],
   "created": "2026-03-08T10:00:00Z",
-  "last_update": "2026-03-08T15:00:00Z"
+  "last_update": "2026-03-08T15:00:00Z",
+  "parent_summary": {
+    "is_parent": true,
+    "child_count": 3,
+    "terminal_child_count": 2,
+    "open_child_count": 1,
+    "by_status": { "complete": 1, "failed": 1, "blocked": 1 },
+    "latest_completed_at": "2026-03-19T01:20:00.000Z",
+    "blocked_child_count": 1,
+    "failed_child_count": 1,
+    "attention_required": true,
+    "blocking_children": []
+  },
+  "control_read_model": {
+    "responsibility_view": { "chain": [], "current_actor": "...", "current_actor_source": "...", "summary": "..." },
+    "ticket_operational_view": { "ticket_id": 1, "status": "...", "bucket": "...", "latest_comment_summary": null, "latest_report_type": null, "worker_stats": null, "reservation": null, "execution_mode": "..." },
+    "execution_guard_view": { "requires_worker": false, "has_worker_evidence": false, "reservation": null, "reservation_conflict": null, "suppress_dispatch": false, "reason": null, "available_actions": [] }
+  }
+}
+```
+
+**说明**：当工单是母单时，详情响应会额外带出 `parent_summary`（等价于 `parent_child_summary`），用于展示子单总数、状态分布、最近收口时间、阻塞/失败关注信号与未闭环子单列表。
+
+### GET /tickets/:id/children
+
+**描述**：读取指定母单的子单列表及聚合汇总，便于详情页 / dashboard 直接消费。
+
+**响应**：
+```json
+{
+  "ticket_id": 1,
+  "summary": {
+    "child_count": 3,
+    "terminal_child_count": 2,
+    "open_child_count": 1,
+    "by_status": { "complete": 1, "failed": 1, "blocked": 1 },
+    "latest_completed_at": "2026-03-19T01:20:00.000Z",
+    "blocked_child_count": 1,
+    "failed_child_count": 1,
+    "attention_required": true,
+    "blocking_children": [
+      { "id": 12, "title": "Child blocked", "status": "blocked" }
+    ]
+  },
+  "items": [
+    { "id": 12, "title": "Child blocked", "status": "blocked", "parent_ticket_id": 1 }
+  ]
 }
 ```
 
@@ -230,6 +336,7 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
 
 **说明**：
 - `status` 未传时默认为 `triage`；显式传 `queued` 等亦可，但 triage -> queue 须经 transition `action=queue`，且工单须已具备 `assigned_agent`、`review_owner`，缺一则返回 409 `TRIAGE_QUEUE_CHAIN_INCOMPLETE`。
+- `triage_owner` 未提供时默认按平台路由：`stock-platform -> cowder`，其余平台默认 `leoss`
 - `review_owner` 未提供时默认回退到 `triage_owner`
 - 当工单进入 `done/review` 时，`current_actor/next_actor` 会显式切到 `review_owner`，并进入 `/api/dispatch/ready` 的 reviewer 主交接链；`/api/notifications/ready` 不再承担 reviewer 主交接
 
@@ -286,9 +393,11 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
 **响应**：
 ```json
 {
+  "request_id": "req_demo_dispatch_ready_123",
   "ready": [
     {
       "dispatch_id": 123,
+      "dispatch_event_id": 123,
       "ticket_id": 22,
       "agent": "donky",
       "status": "running",
@@ -304,12 +413,14 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
 ```
 
 **说明**：
+- 顶层 `request_id` 与 `X-Request-Id` 响应头一致，供 poller / gateway / API 日志串联。
+- `dispatch_event_id` 是 `dispatch_id` 的显式链路别名，便于投递/回执/埋点统一引用。
 - `target_gateway_id` / `transport` 是投递 contract；poller 必须按该 metadata 选择本地还是远端 Gateway。
 - `done/review` 也会出现在 dispatch ready，并投给 `review_owner`；平台只在后续 `dispatch_receipt.decision=accepted` 时推进 `done -> review`。
 - `pending_decision` 不会进入 dispatch ready。
-- `kind` 为空表示正常派单；`kind = workflow_mismatch` 表示责任链/状态异常告警；`kind = nudge` 表示平台统一催办（如 `queued_stale` / `audit_result`）。
+- `kind` 为空表示正常派单；`kind = workflow_mismatch` 表示责任链/状态异常告警；`kind = nudge` 表示平台统一催办（如 `queued_stale` / `audit_result` / `manual`）。
 - `reason / dedupe_key / escalation_tier` 是事件治理 contract：dispatch 至少按 `stage + reason + actor` 可解释，不能再退化成粗粒度 ticket 级去重。
-- 当前 tier 约定：正常派单 `delivery/review`，workflow mismatch `warning`，平台催办 `nudge/escalated`。
+- 当前 tier 约定：正常派单 `delivery/review`，workflow mismatch `warning`，平台催办使用 `L1 / L2 / L3`。
 - transport 投递成功后调用 `/dispatch/ack`，ready 项会进入 `awaiting_receipt`；若在 deadline 前未收到 `dispatch_receipt`，平台会暴露 `dispatch_state / dispatch_ack_deadline_at / dispatch_retry_count / next_dispatch_retry_at` 并允许重派。
 
 ### POST /dispatch/ack
@@ -340,9 +451,11 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
 **响应**：
 ```json
 {
+  "request_id": "req_demo_notifications_ready_456",
   "ready": [
     {
       "event_id": 456,
+      "notification_event_id": 456,
       "type": "done",
       "ticket_id": 22,
       "title": "修复待验收通知路由",
@@ -359,6 +472,8 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
 ```
 
 **路由规则**：
+- 顶层 `request_id` 与 `X-Request-Id` 响应头一致，供通知投递日志与 ack 链路串联。
+- `notification_event_id` 是 `event_id` 的显式链路别名，便于通知投递与重试日志统一引用。
 - `pending_decision / complete / failed`：强制回主控 `mac-main`，不继续派给远端执行位
 - reviewer 主交接不再出现在 notification queue；`done/review -> reviewer` 统一走 `/dispatch/ready` + `dispatch_receipt`
 - `reason / dedupe_key / escalation_tier` 同样是 notification contract；notify 去重至少按 `stage + reason + actor` 生效，而不是只按 `type=status`
@@ -447,6 +562,10 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
 - `api_base_url`：agent 应访问的平台 API 地址
 - `skill_ref` / `playbook_ref`：当前 assignment 应使用的 bundle 版本引用
 - `bootstrap`：最小 bootstrap path（runtime/assignment/skill fetch/report endpoints）
+- `bootstrap.participant_registry`：`/api/v1/agent/participants`
+- `bootstrap.participant_route_resolve`：`/api/v1/agent/routing/resolve`
+- `feature_flags.participant_registry_api=true`
+- `feature_flags.participant_route_resolve_api=true`
 - 本地 gateway 默认可回 `http://127.0.0.1:8788`
 - 远端 gateway 若未配置 `TICKET_AGENT_API_BASE_URL`，返回 `null`，避免错误下发 localhost
 
@@ -457,7 +576,7 @@ Reviewer / live acceptance 流程应**先核 version**：调用 `GET /api/versio
 **关键字段**：
 - `skill_ref` / `playbook_ref`
 - `ticket.execution_mode` / `ticket.execution_mode_source` / `ticket.execution_rule_key` / `ticket.max_active_workers`
-- `ticket.worker_stats` / `ticket.current_workers` / `ticket.execution_workers`（subagent/acp 的真实 worker 证据）
+- `ticket.worker_stats` / `ticket.current_workers` / `ticket.execution_workers`（subagent/acp 的真实 worker 证据；可直接写成 `current_workers=[{agent_id, status, runtime, started_at}]`、`execution_workers=[{worker_id, kind, status, evidence_ref}]`、`worker_stats={total_workers, active_workers, running_workers, succeeded_workers}`）
 - `ticket.dispatch_state` / `ticket.awaiting_receipt_from` / `ticket.dispatch_ack_deadline_at` / `ticket.dispatch_retry_count` / `ticket.next_dispatch_retry_at`
 - `execution.mode` / `execution.guidance` / `execution.worker_evidence_required` / `execution.worker_evidence` / `execution.writeback_contract`
 - `runtime_context.bootstrap`
@@ -493,7 +612,51 @@ heartbeat / reports（及可选带 assignment_token 的 reviewer 写动作）统
 
 > 约束：`execution_mode=subagent/acp` 的 `execution_completed` / `review_submission` 在没有真实 worker 证据（`ticket.worker_stats/current_workers/execution_workers`）时不会自动提审，避免 ticket session 直接冒充下沉执行闭环。
 >
+> **Loop 约束**：若 `execution_mode=subagent/acp` 的当前任务目标属于实现 / 修复 / 回归闭环，主 ticket session 不得只派一次性 analysis 子代理；必须使用 Loop skill（或等价迭代控制）持续驱动子代理，直到达到当前阶段走单标准、显式达到迭代上限，或确认需要人工决策。
+>
 > **reviewer 硬约束**：对 `done/review` 阶段的 reviewer assignment，必须遵循 `dispatch_receipt -> review_submission -> approve/reject` 顺序。仅有 `dispatch_receipt` 不足以直接 complete/queued；若未先成功提交 `review_submission`，agent-facing `approve/reject` 会返回冲突错误。
+#### subagent / acp worker 登记字段模板
+
+当 execution_mode=subagent/acp 或外部开发团队实际接单时，派单说明里要直接告诉执行方：先登记真实 worker 证据，再继续回单。下面这组字段可以直接复制到派单内容里：
+
+```json
+{
+  "ticket": {
+    "execution_mode": "subagent",
+    "max_active_workers": 1
+  },
+  "current_workers": [
+    {
+      "agent_id": "cowder",
+      "status": "running",
+      "runtime": "subagent",
+      "started_at": "2026-03-24T15:00:00+08:00",
+      "evidence_ref": "worker-session-1"
+    }
+  ],
+  "execution_workers": [
+    {
+      "worker_id": "worker-session-1",
+      "kind": "subagent",
+      "status": "running",
+      "evidence_ref": "session:worker-session-1"
+    }
+  ],
+  "worker_stats": {
+    "total_workers": 1,
+    "active_workers": 1,
+    "running_workers": 1,
+    "succeeded_workers": 0
+  },
+  "summary": "已登记真实 worker；后续继续用 progress_update / execution_completed 汇总回单，不再只回自然语言。"
+}
+```
+
+登记成功的判定条件很简单：`assignment.ticket.worker_stats / current_workers / execution_workers` 至少能读到一名真实 worker，且 `current_workers` / `execution_workers` 不是空数组；只有这样，subagent/acp 任务才算具备了可被平台识别的执行证据。
+
+**当前 workflow bridge 规则**：
+- `dispatch_receipt`：
+  - `decision=accepted && stage=queued`：推进 `start_work`（`queued -> running`）
 
 **当前 workflow bridge 规则**：
 - `dispatch_receipt`：

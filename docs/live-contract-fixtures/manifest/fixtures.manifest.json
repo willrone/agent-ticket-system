@@ -1,0 +1,198 @@
+{
+  "manifest_version": "v1",
+  "catalog": "live-contract-fixtures",
+  "status": "machine-readable-mvp",
+  "updated_at": "2026-03-15T11:31:00+08:00",
+  "areas": [
+    "dispatch",
+    "notifications",
+    "dispatch_receipt",
+    "live_acceptance",
+    "workflow_mismatch"
+  ],
+  "index": "../index.md",
+  "baseline": [
+    {
+      "id": "dispatch-notify-receipt-live-contract-baseline",
+      "path": "../baseline/dispatch-notify-receipt-live-contract-baseline.md",
+      "kind": "doc-baseline",
+      "sources": [
+        "docs/API.md",
+        "docs/reference/api.md",
+        "docs/ticket-processing-flow-v1.md",
+        "docs/ticket-platform-current-state.md",
+        "docs/pubsub-event-driven/2026-03-13-工单平台事件清单与Command Contract v1.md",
+        "api/sheeply-e2e.test.js",
+        "api/app.test.js",
+        "api/app.js"
+      ]
+    },
+    {
+      "id": "dispatch-ready-running-33-snapshot",
+      "path": "../baseline/dispatch-ready.running-33.snapshot.json",
+      "kind": "json-fixture",
+      "sources": [
+        "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/capture-manifest.json",
+        "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/dispatch-ready.json",
+        "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-assignment-running-33.json",
+        "docs/API.md",
+        "api/app.test.js"
+      ]
+    },
+    {
+      "id": "notifications-ready-snapshot",
+      "path": "../baseline/notifications-ready.snapshot.json",
+      "kind": "json-fixture",
+      "sources": [
+        "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/capture-manifest.json",
+        "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/notifications-ready.json",
+        "api/sheeply-e2e.test.js",
+        "api/app.test.js",
+        "docs/API.md"
+      ]
+    },
+    {
+      "id": "dispatch-receipt-accepted-bridge-to-running",
+      "path": "../baseline/dispatch-receipt.accepted.bridge-to-running.json",
+      "kind": "json-fixture",
+      "sources": [
+        "api/app.test.js",
+        "docs/API.md",
+        "docs/reference/api.md",
+        "docs/ticket-processing-flow-v1.md"
+      ]
+    }
+  ],
+  "incidents": [
+    {
+      "id": "running-assignment-refresh-gap",
+      "path": "../incidents/2026-03-14-running-assignment-refresh.md",
+      "kind": "incident-note",
+      "status": "documented"
+    },
+    {
+      "id": "workflow-mismatch-false-positive-note",
+      "path": "../incidents/2026-03-14-workflow-mismatch-false-positive.md",
+      "kind": "incident-note",
+      "status": "documented"
+    },
+    {
+      "id": "terminal-stage-should-not-enter-dispatch",
+      "path": "../incidents/terminal-stage-should-not-enter-dispatch.json",
+      "kind": "json-fixture",
+      "sources": [
+        "docs/API.md",
+        "api/app.test.js",
+        "api/sheeply-e2e.test.js"
+      ]
+    },
+    {
+      "id": "dispatch-receipt-cross-ticket-or-event-mismatch",
+      "path": "../incidents/dispatch-receipt-cross-ticket-or-event-mismatch.error.json",
+      "kind": "json-fixture",
+      "sources": [
+        "docs/API.md",
+        "api/assignment-write-validation.js",
+        "api/app.test.js"
+      ]
+    },
+    {
+      "id": "dispatch-receipt-invalid-dispatch-id-error",
+      "path": "../incidents/dispatch-receipt.invalid-dispatch-id.error.json",
+      "kind": "json-fixture",
+      "sources": [
+        "api/app.test.js",
+        "docs/API.md",
+        "api/assignment-write-validation.js"
+      ]
+    },
+    {
+      "id": "pending-decision-should-not-enter-dispatch",
+      "path": "../incidents/pending-decision-should-not-enter-dispatch.json",
+      "kind": "json-fixture",
+      "sources": [
+        "docs/API.md",
+        "api/app.test.js",
+        "api/sheeply-e2e.test.js"
+      ]
+    },
+    {
+      "id": "dispatch-dedupe-ticket-agent-status-contract",
+      "path": "../incidents/dispatch-dedupe-ticket-agent-status-contract.json",
+      "kind": "json-fixture",
+      "sources": [
+        "docs/API.md",
+        "api/app.test.js",
+        "api/app.js"
+      ]
+    },
+    {
+      "id": "dependency-not-closed-live-acceptance",
+      "path": "../incidents/dependency-not-closed-live-acceptance.json",
+      "kind": "json-fixture",
+      "sources": [
+        "docs/reference/api.md",
+        "docs/API.md",
+        "api/app.test.js"
+      ]
+    },
+    {
+      "id": "live-contract-mismatch-verdicts",
+      "path": "../incidents/live-contract-mismatch-verdicts.json",
+      "kind": "json-fixture",
+      "sources": [
+        "docs/reference/api.md",
+        "api/app.test.js",
+        "api/app.js",
+        "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-runtime-context.json",
+        "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-skills-current.json"
+      ]
+    },
+    {
+      "id": "workflow-mismatch-false-positive-before-after",
+      "path": "../incidents/workflow-mismatch.false-positive.before-after.json",
+      "kind": "json-fixture",
+      "sources": [
+        "api/workflow-mismatch.test.js",
+        "api/app.test.js",
+        "api/app.js"
+      ]
+    }
+  ],
+  "validation": {
+    "required_paths": [
+      "docs/live-contract-fixtures/index.md",
+      "docs/live-contract-fixtures/baseline/dispatch-notify-receipt-live-contract-baseline.md",
+      "docs/live-contract-fixtures/baseline/dispatch-ready.running-33.snapshot.json",
+      "docs/live-contract-fixtures/baseline/notifications-ready.snapshot.json",
+      "docs/live-contract-fixtures/baseline/dispatch-receipt.accepted.bridge-to-running.json",
+      "docs/live-contract-fixtures/incidents/2026-03-14-running-assignment-refresh.md",
+      "docs/live-contract-fixtures/incidents/2026-03-14-workflow-mismatch-false-positive.md",
+      "docs/live-contract-fixtures/incidents/terminal-stage-should-not-enter-dispatch.json",
+      "docs/live-contract-fixtures/incidents/dispatch-receipt-cross-ticket-or-event-mismatch.error.json",
+      "docs/live-contract-fixtures/incidents/dispatch-receipt.invalid-dispatch-id.error.json",
+      "docs/live-contract-fixtures/incidents/pending-decision-should-not-enter-dispatch.json",
+      "docs/live-contract-fixtures/incidents/dispatch-dedupe-ticket-agent-status-contract.json",
+      "docs/live-contract-fixtures/incidents/dependency-not-closed-live-acceptance.json",
+      "docs/live-contract-fixtures/incidents/live-contract-mismatch-verdicts.json",
+      "docs/live-contract-fixtures/incidents/workflow-mismatch.false-positive.before-after.json",
+      "docs/live-contract-fixtures/manifest/fixtures.manifest.json",
+      "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/capture-manifest.json",
+      "scripts/validate-live-contract-fixtures.js"
+    ],
+    "source_refs_must_exist": true,
+    "json_fixture_schema": {
+      "required_fields": [
+        "fixture_id",
+        "fixture_type",
+        "version",
+        "summary",
+        "source_refs",
+        "expected",
+        "historical_wrong_behavior"
+      ],
+      "historical_wrong_behavior_min": 1
+    }
+  },
+  "missing_fixtures": []
+}

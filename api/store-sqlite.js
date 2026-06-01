@@ -10,12 +10,19 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { normalizeCommentShape, buildCommentId, parseJsonArray } from './comment-utils.js';
 import {
+  DEFAULT_PLATFORM_AGENTS,
+  DEFAULT_PLATFORM_CAPABILITIES,
+  DEFAULT_ROLE_CONTRACTS,
+  DEFAULT_WORKFLOW_TEMPLATES,
+} from './platform-registry-defaults.js';
+import {
   resolveExecutionPolicy,
   normalizeExecutionMode,
   normalizeMaxActiveWorkers,
   normalizeWorkerStatus,
   isExecutionWorkerActiveStatus,
   validateWorkerTypeForMode,
+  STALE_STARTING_HEARTBEAT_MINUTES,
 } from '../execution-policy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -37,6 +44,9 @@ function getTicketRelationLabel(relationType) {
 }
 
 function getDbPath() {
+  if (process.env.NODE_ENV === 'test') {
+    return ':memory:';
+  }
   return process.env.TICKETS_DB_PATH || path.join(__dirname, '..', 'data', 'tickets.db');
 }
 
@@ -145,6 +155,209 @@ function parseReviewPlanReviewState(value) {
   }
 }
 
+function parseJsonBoolean(value, fallback = false) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function toJson(value, fallback) {
+  if (value === undefined) return JSON.stringify(fallback);
+  return JSON.stringify(value);
+}
+
+function seedPlatformRegistryDefaults(database) {
+  const now = new Date().toISOString();
+
+  const insertCapability = database.prepare(`
+    INSERT INTO platform_capabilities (capability_key, display_name, category, description, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(capability_key) DO UPDATE SET
+      display_name = excluded.display_name,
+      category = excluded.category,
+      description = excluded.description,
+      updated_at = excluded.updated_at
+  `);
+  for (const item of DEFAULT_PLATFORM_CAPABILITIES) {
+    insertCapability.run(
+      String(item.capability_key || '').trim(),
+      String(item.display_name || item.capability_key || '').trim(),
+      item.category ?? null,
+      item.description ?? '',
+      now,
+      now
+    );
+  }
+
+  const insertAgent = database.prepare(`
+    INSERT INTO platform_agents (
+      agent_id, display_name, enabled, role_types_json, capabilities_json, runtime_type, gateway_id,
+      session_policy, concurrency_limit, current_load, health_status, cost_class, trust_level,
+      metadata_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(agent_id) DO UPDATE SET
+      display_name = excluded.display_name,
+      enabled = excluded.enabled,
+      role_types_json = excluded.role_types_json,
+      capabilities_json = excluded.capabilities_json,
+      runtime_type = excluded.runtime_type,
+      gateway_id = excluded.gateway_id,
+      session_policy = excluded.session_policy,
+      concurrency_limit = excluded.concurrency_limit,
+      health_status = excluded.health_status,
+      cost_class = excluded.cost_class,
+      trust_level = excluded.trust_level,
+      metadata_json = excluded.metadata_json,
+      updated_at = excluded.updated_at
+  `);
+  for (const item of DEFAULT_PLATFORM_AGENTS) {
+    insertAgent.run(
+      String(item.agent_id || '').trim().toLowerCase(),
+      String(item.display_name || item.agent_id || '').trim(),
+      item.enabled === false ? 0 : 1,
+      toJson(Array.isArray(item.role_types) ? item.role_types : [], []),
+      toJson(Array.isArray(item.capabilities) ? item.capabilities : [], []),
+      String(item.runtime_type || 'openclaw_session').trim(),
+      item.gateway_id ?? null,
+      String(item.session_policy || 'ticket_session').trim(),
+      Number.isInteger(item.concurrency_limit) ? item.concurrency_limit : 1,
+      Number.isInteger(item.current_load) ? item.current_load : 0,
+      String(item.health_status || 'unknown').trim(),
+      String(item.cost_class || 'standard').trim(),
+      String(item.trust_level || 'standard').trim(),
+      toJson(item.metadata && typeof item.metadata === 'object' ? item.metadata : {}, {}),
+      now,
+      now
+    );
+  }
+
+  const insertRole = database.prepare(`
+    INSERT INTO platform_role_contracts (
+      role_type, display_name, allowed_actions_json, required_reports_json,
+      can_spawn_child, can_request_decision, can_close, conflict_rules_json,
+      description, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(role_type) DO UPDATE SET
+      display_name = excluded.display_name,
+      allowed_actions_json = excluded.allowed_actions_json,
+      required_reports_json = excluded.required_reports_json,
+      can_spawn_child = excluded.can_spawn_child,
+      can_request_decision = excluded.can_request_decision,
+      can_close = excluded.can_close,
+      conflict_rules_json = excluded.conflict_rules_json,
+      description = excluded.description,
+      updated_at = excluded.updated_at
+  `);
+  for (const item of DEFAULT_ROLE_CONTRACTS) {
+    insertRole.run(
+      String(item.role_type || '').trim(),
+      String(item.display_name || item.role_type || '').trim(),
+      toJson(Array.isArray(item.allowed_actions) ? item.allowed_actions : [], []),
+      toJson(Array.isArray(item.required_reports) ? item.required_reports : [], []),
+      item.can_spawn_child ? 1 : 0,
+      item.can_request_decision ? 1 : 0,
+      item.can_close ? 1 : 0,
+      toJson(Array.isArray(item.conflict_rules) ? item.conflict_rules : [], []),
+      item.description ?? '',
+      now,
+      now
+    );
+  }
+
+  const insertTemplate = database.prepare(`
+    INSERT INTO platform_workflow_templates (
+      template_key, version, display_name, description, status_schema_json, role_schema_json,
+      transition_schema_json, required_outputs_json, sla_policy_json, gate_policy_json,
+      closeout_policy_json, enabled, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(template_key, version) DO UPDATE SET
+      display_name = excluded.display_name,
+      description = excluded.description,
+      status_schema_json = excluded.status_schema_json,
+      role_schema_json = excluded.role_schema_json,
+      transition_schema_json = excluded.transition_schema_json,
+      required_outputs_json = excluded.required_outputs_json,
+      sla_policy_json = excluded.sla_policy_json,
+      gate_policy_json = excluded.gate_policy_json,
+      closeout_policy_json = excluded.closeout_policy_json,
+      enabled = excluded.enabled,
+      updated_at = excluded.updated_at
+  `);
+  for (const item of DEFAULT_WORKFLOW_TEMPLATES) {
+    insertTemplate.run(
+      String(item.template_key || '').trim(),
+      Number.isInteger(item.version) ? item.version : 1,
+      String(item.display_name || item.template_key || '').trim(),
+      item.description ?? '',
+      toJson(Array.isArray(item.status_schema) ? item.status_schema : [], []),
+      toJson(Array.isArray(item.role_schema) ? item.role_schema : [], []),
+      toJson(Array.isArray(item.transition_schema) ? item.transition_schema : [], []),
+      toJson(item.required_outputs && typeof item.required_outputs === 'object' ? item.required_outputs : {}, {}),
+      toJson(item.sla_policy && typeof item.sla_policy === 'object' ? item.sla_policy : {}, {}),
+      toJson(item.gate_policy && typeof item.gate_policy === 'object' ? item.gate_policy : {}, {}),
+      toJson(item.closeout_policy && typeof item.closeout_policy === 'object' ? item.closeout_policy : {}, {}),
+      item.enabled === false ? 0 : 1,
+      now,
+      now
+    );
+  }
+}
+
+function normalizeAssignmentRoleType(input = {}) {
+  const explicit = String(input.role_type ?? input.roleType ?? '').trim().toLowerCase();
+  if (explicit) return explicit;
+  const role = String(input.role ?? '').trim().toLowerCase();
+  if (['planner', 'executor', 'reviewer', 'auditor'].includes(role)) return role;
+  if (role === 'execute') return 'executor';
+  if (role === 'review') return 'reviewer';
+  if (role === 'audit') return 'auditor';
+  if (role === 'triage') return 'planner';
+  return 'executor';
+}
+
+function defaultRequiredOutputsForAssignment(roleType, stage) {
+  const normalizedStage = String(stage || '').trim().toLowerCase();
+  if (roleType === 'planner') return ['triage_structured_report'];
+  if (roleType === 'reviewer') return ['review_submission'];
+  if (roleType === 'auditor') return ['audit_result'];
+  if (roleType === 'executor') {
+    if (['queued', 'running'].includes(normalizedStage)) {
+      return ['progress_update', 'execution_completed'];
+    }
+    return ['progress_update'];
+  }
+  return [];
+}
+
+function buildAssignmentV2ShadowContract(input = {}, ticket = {}) {
+  const stage = input.stage ?? ticket.status ?? null;
+  const roleType = normalizeAssignmentRoleType(input);
+  const roleContract = DEFAULT_ROLE_CONTRACTS.find((item) => item.role_type === roleType) || null;
+  const allowedActions = Array.isArray(input.allowed_actions)
+    ? input.allowed_actions
+    : Array.isArray(input.allowedActions)
+      ? input.allowedActions
+      : roleContract?.allowed_actions || [];
+  const requiredOutputs = Array.isArray(input.required_outputs)
+    ? input.required_outputs
+    : Array.isArray(input.requiredOutputs)
+      ? input.requiredOutputs
+      : defaultRequiredOutputsForAssignment(roleType, stage);
+  return {
+    workflow_template: String(input.workflow_template ?? input.workflowTemplate ?? 'software_task_v1').trim() || 'software_task_v1',
+    role_type: roleType,
+    allowed_actions: allowedActions.map((item) => String(item || '').trim()).filter(Boolean),
+    required_outputs: requiredOutputs.map((item) => String(item || '').trim()).filter(Boolean),
+    context_bundle_id: input.context_bundle_id ?? input.contextBundleId ?? null,
+    stale_after_at: input.stale_after_at ?? input.staleAfterAt ?? input.expires_at ?? null,
+    superseded_by: input.superseded_by ?? input.supersededBy ?? null,
+  };
+}
+
 function makeStoreError(code, message, extra = {}) {
   const err = new Error(message);
   err.code = code;
@@ -232,6 +445,13 @@ function assignmentRowToShape(row) {
     assignment_status: row.assignment_status,
     intent: row.intent,
     role: row.role ?? 'execute',
+    role_type: row.role_type ?? normalizeAssignmentRoleType({ role: row.role }),
+    workflow_template: row.workflow_template || 'software_task_v1',
+    allowed_actions: parseJsonArray(row.allowed_actions_json),
+    required_outputs: parseJsonArray(row.required_outputs_json),
+    context_bundle_id: row.context_bundle_id ?? null,
+    stale_after_at: row.stale_after_at ?? null,
+    superseded_by: row.superseded_by ?? null,
     stage: row.stage ?? null,
     assignment_token: row.assignment_token,
     target_session_key: row.target_session_key ?? null,
@@ -243,6 +463,16 @@ function assignmentRowToShape(row) {
     created_at: row.created_at,
     updated_at: row.updated_at,
     expires_at: row.expires_at ?? null,
+    v2_contract: {
+      workflow_template: row.workflow_template || 'software_task_v1',
+      role_type: row.role_type ?? normalizeAssignmentRoleType({ role: row.role }),
+      allowed_actions: parseJsonArray(row.allowed_actions_json),
+      required_outputs: parseJsonArray(row.required_outputs_json),
+      context_bundle_id: row.context_bundle_id ?? null,
+      stale_after_at: row.stale_after_at ?? null,
+      superseded_by: row.superseded_by ?? null,
+      shadow_mode: true,
+    },
   };
 }
 
@@ -293,8 +523,7 @@ function getReportRowByIdempotency(database, assignmentId, idempotencyKey) {
   `).get(String(assignmentId), String(idempotencyKey));
 }
 
-/** starting 无 session_key/run_id 且无新鲜 heartbeat 的视为 stale，不计入 active，避免长期压制 done/review dispatch */
-const STALE_STARTING_HEARTBEAT_MINUTES = 5;
+const STALE_WORKER_EVIDENCE_RESERVATION_MINUTES = 15;
 
 function getTicketWorkerStats(database, ticketId) {
   const totalRow = database.prepare(`
@@ -312,7 +541,14 @@ function getTicketWorkerStats(database, ticketId) {
           AND datetime(last_heartbeat_at) >= datetime('now', ?)
         THEN 1
         ELSE 0
-      END) AS active_workers
+      END) AS active_workers,
+      SUM(CASE
+        WHEN status = 'starting'
+          AND (TRIM(COALESCE(session_key, '')) != '' OR TRIM(COALESCE(run_id, '')) != '')
+          AND last_heartbeat_at IS NOT NULL
+        THEN 1
+        ELSE 0
+      END) AS historical_started_workers
     FROM ticket_execution_workers
     WHERE ticket_id = ? AND status IN ('starting', 'running')
   `).get(`-${STALE_STARTING_HEARTBEAT_MINUTES} minutes`, Number(ticketId));
@@ -321,6 +557,7 @@ function getTicketWorkerStats(database, ticketId) {
     total_workers: Number(totalRow?.total_workers ?? 0),
     active_workers: Number(activeRow?.active_workers ?? 0),
     running_workers: Number(activeRow?.running_workers ?? 0),
+    historical_started_workers: Number(activeRow?.historical_started_workers ?? 0),
   };
 }
 
@@ -453,6 +690,13 @@ function initSchema(database) {
       assignment_status TEXT NOT NULL,
       intent TEXT NOT NULL,
       role TEXT NOT NULL DEFAULT 'execute',
+      role_type TEXT,
+      workflow_template TEXT DEFAULT 'software_task_v1',
+      allowed_actions_json TEXT DEFAULT '[]',
+      required_outputs_json TEXT DEFAULT '[]',
+      context_bundle_id TEXT,
+      stale_after_at TEXT,
+      superseded_by TEXT,
       stage TEXT,
       assignment_token TEXT NOT NULL,
       target_session_key TEXT,
@@ -629,6 +873,106 @@ function initSchema(database) {
       stale_reason TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS participant_registry (
+      participant_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      emoji TEXT,
+      participant_type TEXT DEFAULT 'agent',
+      role_type TEXT,
+      ownership_layer TEXT,
+      primary_platform TEXT,
+      responsibilities_json TEXT DEFAULT '[]',
+      collaborates_with_json TEXT DEFAULT '[]',
+      responsibility_summary TEXT DEFAULT '',
+      gateway_id TEXT,
+      source_kind TEXT DEFAULT 'topology',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS participant_registry_status (
+      participant_id TEXT PRIMARY KEY,
+      availability_status TEXT DEFAULT 'active',
+      eligibility_status TEXT DEFAULT 'eligible',
+      accepts_assignment_types_json TEXT DEFAULT '[]',
+      status_reason TEXT,
+      effective_from TEXT,
+      metadata_json TEXT DEFAULT '{}',
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (participant_id) REFERENCES participant_registry(participant_id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS participant_registry_capabilities (
+      participant_id TEXT NOT NULL,
+      capability_key TEXT NOT NULL,
+      granted INTEGER NOT NULL DEFAULT 1,
+      source_kind TEXT DEFAULT 'topology',
+      metadata_json TEXT DEFAULT '{}',
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (participant_id, capability_key),
+      FOREIGN KEY (participant_id) REFERENCES participant_registry(participant_id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS platform_agents (
+      agent_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      role_types_json TEXT NOT NULL DEFAULT '[]',
+      capabilities_json TEXT NOT NULL DEFAULT '[]',
+      runtime_type TEXT NOT NULL DEFAULT 'openclaw_session',
+      gateway_id TEXT,
+      session_policy TEXT NOT NULL DEFAULT 'ticket_session',
+      concurrency_limit INTEGER NOT NULL DEFAULT 1,
+      current_load INTEGER NOT NULL DEFAULT 0,
+      health_status TEXT NOT NULL DEFAULT 'unknown',
+      cost_class TEXT NOT NULL DEFAULT 'standard',
+      trust_level TEXT NOT NULL DEFAULT 'standard',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS platform_capabilities (
+      capability_key TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      category TEXT,
+      description TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS platform_role_contracts (
+      role_type TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      allowed_actions_json TEXT NOT NULL DEFAULT '[]',
+      required_reports_json TEXT NOT NULL DEFAULT '[]',
+      can_spawn_child INTEGER NOT NULL DEFAULT 0,
+      can_request_decision INTEGER NOT NULL DEFAULT 0,
+      can_close INTEGER NOT NULL DEFAULT 0,
+      conflict_rules_json TEXT NOT NULL DEFAULT '[]',
+      description TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS platform_workflow_templates (
+      template_key TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      display_name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      status_schema_json TEXT NOT NULL DEFAULT '[]',
+      role_schema_json TEXT NOT NULL DEFAULT '[]',
+      transition_schema_json TEXT NOT NULL DEFAULT '[]',
+      required_outputs_json TEXT NOT NULL DEFAULT '{}',
+      sla_policy_json TEXT NOT NULL DEFAULT '{}',
+      gate_policy_json TEXT NOT NULL DEFAULT '{}',
+      closeout_policy_json TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (template_key, version)
+    );
+    CREATE TABLE IF NOT EXISTS platform_routing_decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_json TEXT NOT NULL DEFAULT '{}',
+      result_json TEXT NOT NULL DEFAULT '{}',
+      routing_reason TEXT DEFAULT '',
+      created_at TEXT NOT NULL
+    );
   `);
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_domain_events_aggregate ON domain_events(aggregate_type, aggregate_id);
@@ -642,6 +986,14 @@ function initSchema(database) {
     CREATE INDEX IF NOT EXISTS idx_validation_audit_ticket ON validation_audit(ticket_id);
     CREATE INDEX IF NOT EXISTS idx_execution_reservations_agent_state ON execution_reservations(agent_id, state);
     CREATE INDEX IF NOT EXISTS idx_execution_reservations_ticket ON execution_reservations(ticket_id);
+    CREATE INDEX IF NOT EXISTS idx_participant_registry_platform ON participant_registry(primary_platform);
+    CREATE INDEX IF NOT EXISTS idx_participant_registry_gateway ON participant_registry(gateway_id);
+    CREATE INDEX IF NOT EXISTS idx_participant_registry_capability_key ON participant_registry_capabilities(capability_key);
+    CREATE INDEX IF NOT EXISTS idx_platform_agents_gateway ON platform_agents(gateway_id);
+    CREATE INDEX IF NOT EXISTS idx_platform_agents_health ON platform_agents(health_status);
+    CREATE INDEX IF NOT EXISTS idx_platform_capabilities_category ON platform_capabilities(category);
+    CREATE INDEX IF NOT EXISTS idx_platform_workflow_templates_enabled ON platform_workflow_templates(enabled);
+    CREATE INDEX IF NOT EXISTS idx_platform_routing_decisions_created_at ON platform_routing_decisions(created_at);
   `);
   ensureColumn(database, 'audit_ready_projection', 'stale_minutes', 'INTEGER');
 
@@ -670,6 +1022,7 @@ function initSchema(database) {
   ensureColumn(database, 'tickets', 'decision_owner', 'TEXT');
   ensureColumn(database, 'tickets', 'decision_summary', 'TEXT');
   ensureColumn(database, 'tickets', 'decision_context', 'TEXT');
+  ensureColumn(database, 'tickets', 'deprecation_reason', 'TEXT');
   ensureColumn(database, 'tickets', 'review_plan', 'TEXT');
   ensureColumn(database, 'tickets', 'review_state', 'TEXT');
   ensureColumn(database, 'tickets', 'execution_mode', 'TEXT');
@@ -683,6 +1036,13 @@ function initSchema(database) {
   ensureColumn(database, 'ticket_assignments', 'assignment_status', "TEXT DEFAULT 'created'");
   ensureColumn(database, 'ticket_assignments', 'intent', "TEXT DEFAULT 'dispatch'");
   ensureColumn(database, 'ticket_assignments', 'role', "TEXT DEFAULT 'execute'");
+  ensureColumn(database, 'ticket_assignments', 'role_type', 'TEXT');
+  ensureColumn(database, 'ticket_assignments', 'workflow_template', "TEXT DEFAULT 'software_task_v1'");
+  ensureColumn(database, 'ticket_assignments', 'allowed_actions_json', "TEXT DEFAULT '[]'");
+  ensureColumn(database, 'ticket_assignments', 'required_outputs_json', "TEXT DEFAULT '[]'");
+  ensureColumn(database, 'ticket_assignments', 'context_bundle_id', 'TEXT');
+  ensureColumn(database, 'ticket_assignments', 'stale_after_at', 'TEXT');
+  ensureColumn(database, 'ticket_assignments', 'superseded_by', 'TEXT');
   ensureColumn(database, 'ticket_assignments', 'stage', 'TEXT');
   ensureColumn(database, 'ticket_assignments', 'assignment_token', 'TEXT');
   ensureColumn(database, 'ticket_assignments', 'target_session_key', 'TEXT');
@@ -722,6 +1082,7 @@ function initSchema(database) {
   `);
 
   ensureCounter(database, 'tickets', 'tickets');
+  seedPlatformRegistryDefaults(database);
   purgeStaleCommentsForReusedTicketIds(database);
 }
 
@@ -794,7 +1155,7 @@ function getTicketRelationsForTicket(database, ticketId) {
     const statusKey = String(relation.ticket?.status || 'unknown').trim() || 'unknown';
     summary.total += 1;
     summary.by_status[statusKey] = (summary.by_status[statusKey] || 0) + 1;
-    if (!['complete', 'failed'].includes(statusKey)) {
+    if (!['complete', 'failed', 'deprecated'].includes(statusKey)) {
       summary.open += 1;
     }
     if (statusKey === 'complete') summary.complete += 1;
@@ -829,26 +1190,68 @@ export function findExecutionReservationConflict({ agentId, excludeTicketId = nu
   if (!normalizedAgent) return null;
 
   const database = getDb();
-  const row = database.prepare(`
+  const rows = database.prepare(`
     SELECT * FROM execution_reservations
     WHERE agent_id = ?
       AND state IN ('reserved', 'receipt_accepted', 'running')
       AND (? IS NULL OR ticket_id != ?)
     ORDER BY datetime(created_at) ASC, id ASC
-    LIMIT 1
-  `).get(normalizedAgent, excludeTicketId ?? null, excludeTicketId ?? null);
+  `).all(normalizedAgent, excludeTicketId ?? null, excludeTicketId ?? null);
 
-  if (!row) return null;
-  const ticketRow = database.prepare('SELECT id, status FROM tickets WHERE id = ?').get(Number(row.ticket_id));
-  if (!ticketRow || !['queued', 'running'].includes(String(ticketRow.status || '').trim())) {
-    updateExecutionReservation(row.ticket_id, {
-      state: 'released',
-      release_reason: 'stale_ticket_state',
-      released_at: new Date().toISOString(),
-    });
-    return null;
+  for (const row of rows) {
+    const ticketRow = database.prepare(`
+      SELECT id, status, execution_mode, max_active_workers FROM tickets WHERE id = ?
+    `).get(Number(row.ticket_id));
+    if (!ticketRow || !['queued', 'running'].includes(String(ticketRow.status || '').trim())) {
+      updateExecutionReservation(row.ticket_id, {
+        state: 'released',
+        release_reason: 'stale_ticket_state',
+        released_at: new Date().toISOString(),
+      });
+      continue;
+    }
+
+    const workerStats = getTicketWorkerStats(database, Number(row.ticket_id));
+    const requiresWorker = ['subagent', 'acp'].includes(String(ticketRow.execution_mode || '').trim());
+    const reservationTouchedAtMs = Date.parse(row.updated_at || row.created_at || '');
+    const staleWorkerEvidence = requiresWorker
+      && ['reserved', 'receipt_accepted'].includes(String(row.state || '').trim())
+      && Number(workerStats.active_workers ?? 0) === 0
+      && Number(workerStats.running_workers ?? 0) === 0
+      && Number(workerStats.historical_started_workers ?? 0) === 0
+      && Number.isFinite(reservationTouchedAtMs)
+      && reservationTouchedAtMs <= (Date.now() - STALE_WORKER_EVIDENCE_RESERVATION_MINUTES * 60 * 1000);
+
+    if (staleWorkerEvidence) {
+      updateExecutionReservation(row.ticket_id, {
+        state: 'released',
+        release_reason: 'stale_worker_evidence',
+        released_at: new Date().toISOString(),
+      });
+      continue;
+    }
+
+    const staleRunningReservation = requiresWorker
+      && String(row.state || '').trim() === 'running'
+      && String(ticketRow.status || '').trim() === 'running'
+      && Number(workerStats.active_workers ?? 0) === 0
+      && Number(workerStats.running_workers ?? 0) === 0
+      && Number.isFinite(reservationTouchedAtMs)
+      && reservationTouchedAtMs <= (Date.now() - STALE_WORKER_EVIDENCE_RESERVATION_MINUTES * 60 * 1000);
+
+    if (staleRunningReservation) {
+      updateExecutionReservation(row.ticket_id, {
+        state: 'released',
+        release_reason: 'stale_running_reservation',
+        released_at: new Date().toISOString(),
+      });
+      continue;
+    }
+
+    return executionReservationRowToShape(row);
   }
-  return executionReservationRowToShape(row);
+
+  return null;
 }
 
 export function tryAcquireExecutionReservation(input = {}) {
@@ -1039,6 +1442,7 @@ function rowToTicket(row, comments = [], relations = {}, options = {}) {
     decision_owner: row.decision_owner ?? null,
     decision_summary: row.decision_summary ?? null,
     decision_context: row.decision_context ?? null,
+    deprecation_reason: row.deprecation_reason ?? null,
     assigned_agent: row.assigned_agent,
     next_actor: row.next_actor ?? null,
     next_actor_override: row.next_actor_override ?? null,
@@ -1115,10 +1519,10 @@ export function getTicketById(id) {
   const comments = database.prepare(commentSelectSql()).all(row.id)
     .filter((comment) => !isCommentEarlierThanTicket(comment.timestamp, row.created));
   const parentRow = row.parent_ticket_id
-    ? database.prepare('SELECT id, title, status, assigned_agent FROM tickets WHERE id = ?').get(row.parent_ticket_id)
+    ? database.prepare('SELECT id, title, status, assigned_agent, result_summary, last_update FROM tickets WHERE id = ?').get(row.parent_ticket_id)
     : null;
   const childRows = database.prepare(
-    'SELECT id, title, status, assigned_agent FROM tickets WHERE parent_ticket_id = ? ORDER BY id'
+    'SELECT id, title, status, assigned_agent, result_summary, last_update FROM tickets WHERE parent_ticket_id = ? ORDER BY id'
   ).all(row.id);
   return rowToTicket(row, comments, {
     parent_ticket: summarizeTicketRow(parentRow),
@@ -1149,6 +1553,7 @@ export function createTicket(ticket) {
       decision_owner,
       decision_summary,
       decision_context,
+      deprecation_reason,
       assigned_agent,
       next_actor,
       next_actor_override,
@@ -1182,7 +1587,7 @@ export function createTicket(ticket) {
       execution_matched_signals_json,
       max_active_workers
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const id = allocateId(database, 'tickets', 'tickets');
   stmt.run(
@@ -1195,6 +1600,7 @@ export function createTicket(ticket) {
     ticket.decision_owner ?? null,
     ticket.decision_summary ?? null,
     ticket.decision_context ?? null,
+    ticket.deprecation_reason ?? null,
     ticket.assigned_agent ?? null,
     ticket.next_actor ?? null,
     ticket.next_actor_override ?? null,
@@ -1286,7 +1692,7 @@ export function updateTicket(id, updates) {
   if (!existing) return null;
   const now = new Date().toISOString();
   const directAllowed = [
-    'title', 'description', 'status', 'triage_owner', 'review_owner', 'decision_owner', 'decision_summary', 'decision_context', 'assigned_agent', 'next_actor', 'next_actor_override', 'priority',
+    'title', 'description', 'status', 'triage_owner', 'review_owner', 'decision_owner', 'decision_summary', 'decision_context', 'deprecation_reason', 'assigned_agent', 'next_actor', 'next_actor_override', 'priority',
     'platform', 'request_type', 'triage_summary', 'implementation_scope',
     'deliverables', 'acceptance_criteria', 'review_plan_json', 'review_state_json', 'parent_ticket_id',
     'session_key', 'run_id', 'result_summary', 'error', 'last_update', 'locked_by', 'locked_at',
@@ -1708,10 +2114,32 @@ export function findLatestAssignmentForTicket(ticketId, agentId = null) {
   const row = database.prepare(`
     SELECT * FROM ticket_assignments
     WHERE ${clauses.join(' AND ')}
-    ORDER BY updated_at DESC, id DESC
+    ORDER BY id DESC
     LIMIT 1
   `).get(...params);
   return assignmentRowToShape(row);
+}
+
+export function invalidateAssignmentsForTicket(ticketId, updates = {}) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  const nextStatus = String(updates.assignment_status || 'failed_delivery').trim() || 'failed_delivery';
+  const nextError = updates.last_error ?? 'ticket_reset_to_queued';
+  const nextStage = updates.stage ?? null;
+  const rows = database.prepare(`
+    SELECT assignment_id FROM ticket_assignments WHERE ticket_id = ?
+  `).all(Number(ticketId));
+
+  for (const row of rows) {
+    updateAssignment(row.assignment_id, {
+      assignment_status: nextStatus,
+      last_error: nextError,
+      ...(updates.expires_at !== undefined ? { expires_at: updates.expires_at } : { expires_at: now }),
+      ...(nextStage !== undefined ? { stage: nextStage } : {}),
+    });
+  }
+
+  return rows.length;
 }
 
 export function createOrReuseAssignment(input = {}) {
@@ -1739,14 +2167,17 @@ export function createOrReuseAssignment(input = {}) {
   const now = new Date().toISOString();
   const assignmentId = String(input.assignment_id ?? input.assignmentId ?? buildAssignmentId(ticketId, agentId));
   const assignmentToken = String(input.assignment_token ?? input.assignmentToken ?? buildAssignmentToken());
+  const v2Shadow = buildAssignmentV2ShadowContract(input, ticket);
 
   try {
     database.prepare(`
       INSERT INTO ticket_assignments (
         assignment_id, ticket_id, dispatch_event_id, agent_id, gateway_id, execution_mode,
-        assignment_status, intent, role, stage, assignment_token, target_session_key, transport,
+        assignment_status, intent, role, role_type, workflow_template, allowed_actions_json,
+        required_outputs_json, context_bundle_id, stale_after_at, superseded_by, stage,
+        assignment_token, target_session_key, transport,
         last_heartbeat_at, last_reported_at, latest_progress_json, last_error, created_at, updated_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       assignmentId,
       ticketId,
@@ -1757,6 +2188,13 @@ export function createOrReuseAssignment(input = {}) {
       input.assignment_status ?? input.assignmentStatus ?? 'created',
       input.intent ?? 'dispatch',
       input.role ?? 'execute',
+      v2Shadow.role_type,
+      v2Shadow.workflow_template,
+      JSON.stringify(v2Shadow.allowed_actions),
+      JSON.stringify(v2Shadow.required_outputs),
+      v2Shadow.context_bundle_id,
+      v2Shadow.stale_after_at,
+      v2Shadow.superseded_by,
       input.stage ?? ticket.status ?? null,
       assignmentToken,
       input.target_session_key ?? input.targetSessionKey ?? null,
@@ -1790,7 +2228,8 @@ export function updateAssignment(assignmentId, updates = {}) {
 
   const directAllowed = [
     'dispatch_event_id', 'agent_id', 'gateway_id', 'execution_mode', 'assignment_status', 'intent',
-    'role', 'stage', 'assignment_token', 'target_session_key', 'transport',
+    'role', 'role_type', 'workflow_template', 'context_bundle_id', 'stale_after_at', 'superseded_by',
+    'stage', 'assignment_token', 'target_session_key', 'transport',
     'last_heartbeat_at', 'last_reported_at', 'last_error', 'expires_at',
   ];
   const setParts = [];
@@ -1804,6 +2243,16 @@ export function updateAssignment(assignmentId, updates = {}) {
   if (updates.latest_progress !== undefined) {
     setParts.push('latest_progress_json = ?');
     values.push(JSON.stringify(updates.latest_progress && typeof updates.latest_progress === 'object' ? updates.latest_progress : {}));
+  }
+  if (updates.allowed_actions !== undefined || updates.allowedActions !== undefined) {
+    const allowedActions = Array.isArray(updates.allowed_actions) ? updates.allowed_actions : (Array.isArray(updates.allowedActions) ? updates.allowedActions : []);
+    setParts.push('allowed_actions_json = ?');
+    values.push(JSON.stringify(allowedActions.map((item) => String(item || '').trim()).filter(Boolean)));
+  }
+  if (updates.required_outputs !== undefined || updates.requiredOutputs !== undefined) {
+    const requiredOutputs = Array.isArray(updates.required_outputs) ? updates.required_outputs : (Array.isArray(updates.requiredOutputs) ? updates.requiredOutputs : []);
+    setParts.push('required_outputs_json = ?');
+    values.push(JSON.stringify(requiredOutputs.map((item) => String(item || '').trim()).filter(Boolean)));
   }
 
   if (setParts.length === 0) return getAssignmentById(assignmentId);
@@ -1959,6 +2408,18 @@ export function finalizeAssignmentReport(assignmentId, idempotencyKey, updates =
   if (updates.assignment_status !== undefined) assignmentUpdates.assignment_status = updates.assignment_status;
   if (updates.latest_progress !== undefined) assignmentUpdates.latest_progress = updates.latest_progress;
   updateAssignment(assignmentId, assignmentUpdates);
+
+  const successorAssignmentId = String(updates.interpreter_result?.successor_assignment?.assignment_id || '').trim();
+  if (successorAssignmentId) {
+    const successor = getAssignmentById(successorAssignmentId);
+    if (successor) {
+      updateAssignment(successorAssignmentId, {
+        assignment_status: successor.assignment_status,
+        latest_progress: successor.latest_progress,
+        last_error: successor.last_error,
+      });
+    }
+  }
 
   return getAssignmentReportByIdempotency(assignmentId, idempotencyKey);
 }
@@ -2418,6 +2879,312 @@ export function getWorkerProjectionForTicket(ticketId) {
   }));
 }
 
+function participantRowToShape(row, statusRow = null, capabilityRows = []) {
+  if (!row) return null;
+  const capabilities = capabilityRows
+    .filter((item) => Number(item?.granted ?? 1) !== 0 && String(item?.capability_key || '').trim())
+    .map((item) => String(item.capability_key).trim())
+    .sort();
+  return {
+    participant_id: row.participant_id,
+    display_name: row.display_name,
+    emoji: row.emoji ?? null,
+    participant_type: row.participant_type || 'agent',
+    role_type: row.role_type ?? null,
+    ownership_layer: row.ownership_layer ?? null,
+    primary_platform: row.primary_platform ?? null,
+    responsibilities: parseJsonArray(row.responsibilities_json),
+    collaborates_with: parseJsonArray(row.collaborates_with_json),
+    responsibility_summary: row.responsibility_summary || '',
+    gateway_id: row.gateway_id ?? null,
+    source_kind: row.source_kind || 'topology',
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    status: {
+      availability_status: statusRow?.availability_status || 'active',
+      eligibility_status: statusRow?.eligibility_status || 'eligible',
+      accepts_assignment_types: parseJsonArray(statusRow?.accepts_assignment_types_json),
+      status_reason: statusRow?.status_reason ?? null,
+      effective_from: statusRow?.effective_from ?? null,
+      metadata: parseJsonObject(statusRow?.metadata_json, {}),
+      updated_at: statusRow?.updated_at || row.updated_at,
+    },
+    capabilities,
+  };
+}
+
+function getParticipantStatusRows(database) {
+  return new Map(
+    database.prepare('SELECT * FROM participant_registry_status').all().map((row) => [row.participant_id, row])
+  );
+}
+
+function getParticipantCapabilityRows(database) {
+  const grouped = new Map();
+  const rows = database.prepare('SELECT * FROM participant_registry_capabilities ORDER BY participant_id ASC, capability_key ASC').all();
+  for (const row of rows) {
+    const list = grouped.get(row.participant_id) || [];
+    list.push(row);
+    grouped.set(row.participant_id, list);
+  }
+  return grouped;
+}
+
+export function upsertParticipantRegistryEntry(input = {}) {
+  const database = getDb();
+  const participantId = String(input.participant_id || '').trim().toLowerCase();
+  if (!participantId) {
+    throw new Error('participant_id is required');
+  }
+  const now = new Date().toISOString();
+  const existing = database.prepare('SELECT created_at FROM participant_registry WHERE participant_id = ?').get(participantId);
+  database.prepare(`
+    INSERT INTO participant_registry (
+      participant_id, display_name, emoji, participant_type, role_type, ownership_layer, primary_platform,
+      responsibilities_json, collaborates_with_json, responsibility_summary, gateway_id, source_kind, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(participant_id) DO UPDATE SET
+      display_name = excluded.display_name,
+      emoji = excluded.emoji,
+      participant_type = excluded.participant_type,
+      role_type = excluded.role_type,
+      ownership_layer = excluded.ownership_layer,
+      primary_platform = excluded.primary_platform,
+      responsibilities_json = excluded.responsibilities_json,
+      collaborates_with_json = excluded.collaborates_with_json,
+      responsibility_summary = excluded.responsibility_summary,
+      gateway_id = excluded.gateway_id,
+      source_kind = excluded.source_kind,
+      updated_at = excluded.updated_at
+  `).run(
+    participantId,
+    String(input.display_name || participantId).trim(),
+    input.emoji ?? null,
+    String(input.participant_type || 'agent').trim() || 'agent',
+    input.role_type ?? null,
+    input.ownership_layer ?? null,
+    input.primary_platform ?? null,
+    JSON.stringify(Array.isArray(input.responsibilities) ? input.responsibilities : []),
+    JSON.stringify(Array.isArray(input.collaborates_with) ? input.collaborates_with : []),
+    input.responsibility_summary || '',
+    input.gateway_id ?? null,
+    String(input.source_kind || 'topology').trim() || 'topology',
+    existing?.created_at || now,
+    now
+  );
+
+  if (input.status && typeof input.status === 'object') {
+    const status = input.status;
+    database.prepare(`
+      INSERT INTO participant_registry_status (
+        participant_id, availability_status, eligibility_status, accepts_assignment_types_json,
+        status_reason, effective_from, metadata_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(participant_id) DO UPDATE SET
+        availability_status = excluded.availability_status,
+        eligibility_status = excluded.eligibility_status,
+        accepts_assignment_types_json = excluded.accepts_assignment_types_json,
+        status_reason = excluded.status_reason,
+        effective_from = excluded.effective_from,
+        metadata_json = excluded.metadata_json,
+        updated_at = excluded.updated_at
+    `).run(
+      participantId,
+      String(status.availability_status || 'active').trim() || 'active',
+      String(status.eligibility_status || 'eligible').trim() || 'eligible',
+      JSON.stringify(Array.isArray(status.accepts_assignment_types) ? status.accepts_assignment_types : []),
+      status.status_reason ?? null,
+      status.effective_from ?? null,
+      JSON.stringify(status.metadata && typeof status.metadata === 'object' ? status.metadata : {}),
+      now
+    );
+  }
+
+  if (Array.isArray(input.capabilities)) {
+    database.prepare('DELETE FROM participant_registry_capabilities WHERE participant_id = ?').run(participantId);
+    const insertCapability = database.prepare(`
+      INSERT INTO participant_registry_capabilities (participant_id, capability_key, granted, source_kind, metadata_json, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    for (const capability of [...new Set(input.capabilities.map((item) => String(item || '').trim()).filter(Boolean))]) {
+      insertCapability.run(participantId, capability, 1, String(input.source_kind || 'topology').trim() || 'topology', '{}', now);
+    }
+  }
+
+  return getParticipantRegistryEntry(participantId);
+}
+
+export function getParticipantRegistryEntry(participantId) {
+  const database = getDb();
+  const normalizedId = String(participantId || '').trim().toLowerCase();
+  if (!normalizedId) return null;
+  const row = database.prepare('SELECT * FROM participant_registry WHERE participant_id = ?').get(normalizedId);
+  if (!row) return null;
+  const statusRow = database.prepare('SELECT * FROM participant_registry_status WHERE participant_id = ?').get(normalizedId) || null;
+  const capabilityRows = database.prepare('SELECT * FROM participant_registry_capabilities WHERE participant_id = ? ORDER BY capability_key ASC').all(normalizedId);
+  return participantRowToShape(row, statusRow, capabilityRows);
+}
+
+export function listParticipantRegistryEntries() {
+  const database = getDb();
+  const rows = database.prepare('SELECT * FROM participant_registry ORDER BY participant_id ASC').all();
+  const statusRows = getParticipantStatusRows(database);
+  const capabilityRows = getParticipantCapabilityRows(database);
+  return rows.map((row) => participantRowToShape(row, statusRows.get(row.participant_id) || null, capabilityRows.get(row.participant_id) || []));
+}
+
+export function syncParticipantRegistryFromTopology(entries = [], options = {}) {
+  const database = getDb();
+  const normalizedEntries = Array.isArray(entries) ? entries : [];
+  const seenIds = new Set();
+  const tx = database.transaction((items) => {
+    for (const item of items) {
+      const participantId = String(item?.participant_id || '').trim().toLowerCase();
+      if (!participantId) continue;
+      seenIds.add(participantId);
+      upsertParticipantRegistryEntry({
+        ...item,
+        participant_id: participantId,
+        source_kind: item?.source_kind || options.source_kind || 'topology',
+      });
+    }
+    if (parseJsonBoolean(options.prune_missing, false) && seenIds.size > 0) {
+      const placeholders = [...seenIds].map(() => '?').join(', ');
+      database.prepare(`DELETE FROM participant_registry WHERE participant_id NOT IN (${placeholders})`).run(...seenIds);
+    }
+  });
+  tx(normalizedEntries);
+  return listParticipantRegistryEntries();
+}
+
+function platformAgentRowToShape(row) {
+  if (!row) return null;
+  return {
+    agent_id: row.agent_id,
+    display_name: row.display_name,
+    enabled: Number(row.enabled) !== 0,
+    role_types: parseJsonArray(row.role_types_json),
+    capabilities: parseJsonArray(row.capabilities_json),
+    runtime_type: row.runtime_type || 'openclaw_session',
+    gateway_id: row.gateway_id ?? null,
+    session_policy: row.session_policy || 'ticket_session',
+    concurrency_limit: Number(row.concurrency_limit ?? 1),
+    current_load: Number(row.current_load ?? 0),
+    health_status: row.health_status || 'unknown',
+    cost_class: row.cost_class || 'standard',
+    trust_level: row.trust_level || 'standard',
+    metadata: parseJsonObject(row.metadata_json, {}),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function platformCapabilityRowToShape(row) {
+  if (!row) return null;
+  return {
+    capability_key: row.capability_key,
+    display_name: row.display_name,
+    category: row.category ?? null,
+    description: row.description || '',
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function roleContractRowToShape(row) {
+  if (!row) return null;
+  return {
+    role_type: row.role_type,
+    display_name: row.display_name,
+    allowed_actions: parseJsonArray(row.allowed_actions_json),
+    required_reports: parseJsonArray(row.required_reports_json),
+    can_spawn_child: Number(row.can_spawn_child) !== 0,
+    can_request_decision: Number(row.can_request_decision) !== 0,
+    can_close: Number(row.can_close) !== 0,
+    conflict_rules: parseJsonArray(row.conflict_rules_json),
+    description: row.description || '',
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function workflowTemplateRowToShape(row) {
+  if (!row) return null;
+  return {
+    template_key: row.template_key,
+    version: Number(row.version ?? 1),
+    display_name: row.display_name,
+    description: row.description || '',
+    status_schema: parseJsonArray(row.status_schema_json),
+    role_schema: parseJsonArray(row.role_schema_json),
+    transition_schema: JSON.parse(row.transition_schema_json || '[]'),
+    required_outputs: parseJsonObject(row.required_outputs_json, {}),
+    sla_policy: parseJsonObject(row.sla_policy_json, {}),
+    gate_policy: parseJsonObject(row.gate_policy_json, {}),
+    closeout_policy: parseJsonObject(row.closeout_policy_json, {}),
+    enabled: Number(row.enabled) !== 0,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export function listPlatformAgents() {
+  const database = getDb();
+  return database.prepare('SELECT * FROM platform_agents ORDER BY agent_id ASC').all().map(platformAgentRowToShape);
+}
+
+export function listPlatformCapabilities() {
+  const database = getDb();
+  return database.prepare('SELECT * FROM platform_capabilities ORDER BY category ASC, capability_key ASC').all().map(platformCapabilityRowToShape);
+}
+
+export function listPlatformRoleContracts() {
+  const database = getDb();
+  return database.prepare('SELECT * FROM platform_role_contracts ORDER BY role_type ASC').all().map(roleContractRowToShape);
+}
+
+export function listPlatformWorkflowTemplates() {
+  const database = getDb();
+  return database.prepare('SELECT * FROM platform_workflow_templates ORDER BY template_key ASC, version ASC').all().map(workflowTemplateRowToShape);
+}
+
+export function recordPlatformRoutingDecision(input = {}) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  const result = input.result && typeof input.result === 'object' ? input.result : {};
+  const request = input.request && typeof input.request === 'object' ? input.request : {};
+  const info = database.prepare(`
+    INSERT INTO platform_routing_decisions (request_json, result_json, routing_reason, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run(
+    JSON.stringify(request),
+    JSON.stringify(result),
+    String(input.routing_reason || result.reason || '').trim(),
+    now
+  );
+  return {
+    id: Number(info.lastInsertRowid),
+    request,
+    result,
+    routing_reason: String(input.routing_reason || result.reason || '').trim(),
+    created_at: now,
+  };
+}
+
+export function listPlatformRoutingDecisions({ limit = 50 } = {}) {
+  const database = getDb();
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
+  return database.prepare(`
+    SELECT * FROM platform_routing_decisions ORDER BY datetime(created_at) DESC, id DESC LIMIT ?
+  `).all(safeLimit).map((row) => ({
+    id: row.id,
+    request: parseJsonObject(row.request_json, {}),
+    result: parseJsonObject(row.result_json, {}),
+    routing_reason: row.routing_reason || '',
+    created_at: row.created_at,
+  }));
+}
+
 // 关系建模：补充验证 / smoke / review sample
 export function addTicketRelation(sourceTicketId, targetTicketId, relationType) {
   const database = getDb();
@@ -2500,6 +3267,28 @@ export function getDependencies(ticketId) {
     JOIN tickets t ON d.depends_on_ticket_id = t.id
     WHERE d.ticket_id = ?
   `).all(ticketId);
+}
+
+export function getDependencySummaryMap() {
+  const database = getDb();
+  const summaryByTicketId = new Map();
+  const rows = database.prepare(`
+    SELECT ticket_id, depends_on_ticket_id
+    FROM ticket_dependencies
+    ORDER BY ticket_id, depends_on_ticket_id
+  `).all();
+
+  for (const row of rows) {
+    const dependencyEntry = summaryByTicketId.get(row.ticket_id) || { dependency_count: 0, dependent_count: 0 };
+    dependencyEntry.dependency_count += 1;
+    summaryByTicketId.set(row.ticket_id, dependencyEntry);
+
+    const dependentEntry = summaryByTicketId.get(row.depends_on_ticket_id) || { dependency_count: 0, dependent_count: 0 };
+    dependentEntry.dependent_count += 1;
+    summaryByTicketId.set(row.depends_on_ticket_id, dependentEntry);
+  }
+
+  return summaryByTicketId;
 }
 
 export function getDependents(ticketId) {

@@ -1,0 +1,104 @@
+{
+  "fixture_id": "workflow-mismatch-false-positive-before-after",
+  "fixture_type": "workflow-mismatch-case",
+  "version": "v1",
+  "summary": "固化 workflow_mismatch 的两类误伤与两类正例：system/audit 评论应忽略，普通 current context 实现说明不应触发 context_gap，但真实 context gap / external blocked 仍应命中。",
+  "source_refs": [
+    "api/workflow-mismatch.test.js",
+    "api/app.test.js",
+    "api/app.js"
+  ],
+  "expected": {
+    "should_ignore_system_audit_comment": true,
+    "should_ignore_implementation_context_phrase": true,
+    "should_still_detect_real_context_gap": true,
+    "should_still_detect_real_external_blocked": true
+  },
+  "cases": [
+    {
+      "case_id": "system-audit-comment-ignored",
+      "ticket": {
+        "status": "running",
+        "comments": [
+          {
+            "content": "已完成实现与测试，准备收口",
+            "type": "progress",
+            "timestamp": "2025-01-02T00:00:00Z"
+          },
+          {
+            "content": "【审计回写】建议仅提醒继续推进，未见外部依赖或阻塞证据",
+            "type": "system",
+            "timestamp": "2025-01-03T00:00:00Z"
+          }
+        ]
+      },
+      "expected_result": {
+        "should_mismatch": false,
+        "category": null,
+        "recommended_status": null
+      },
+      "historical_wrong_behavior": "system/audit 评论被当成真实 blocker/decision 语义，拦截正常 dispatch。"
+    },
+    {
+      "case_id": "implementation-current-context-phrase-ignored",
+      "ticket": {
+        "status": "running",
+        "comments": [
+          {
+            "content": "实现时请优先修正 current context 选择逻辑，并展示 context latest active time",
+            "type": "progress",
+            "timestamp": "2025-01-03T00:00:00Z"
+          }
+        ]
+      },
+      "expected_result": {
+        "should_mismatch": false,
+        "category": null,
+        "recommended_status": null
+      },
+      "historical_wrong_behavior": "普通实现说明里的 current context/上下文 被误判成 context_gap。"
+    },
+    {
+      "case_id": "real-context-gap-still-detected",
+      "ticket": {
+        "status": "running",
+        "comments": [
+          {
+            "content": "token 不够用了，上下文不足，需要更多信息",
+            "type": "blocker",
+            "timestamp": "2025-01-02T00:00:00Z"
+          }
+        ]
+      },
+      "expected_result": {
+        "should_mismatch": true,
+        "category": "context_gap",
+        "recommended_status": "review"
+      },
+      "historical_wrong_behavior": "规则收紧过头会把真实 context gap 也漏掉，导致 reviewer 看不到应转 review 的单。"
+    },
+    {
+      "case_id": "real-external-blocked-still-detected",
+      "ticket": {
+        "status": "running",
+        "comments": [
+          {
+            "content": "等外部 API 权限，依赖 ops 审批",
+            "type": "blocker",
+            "timestamp": "2025-01-02T00:00:00Z"
+          }
+        ]
+      },
+      "expected_result": {
+        "should_mismatch": true,
+        "category": "external_blocked",
+        "recommended_status": "blocked"
+      },
+      "historical_wrong_behavior": "workflow_mismatch 规则改动若回退或误删，可能让真实外部阻塞不再被识别。"
+    }
+  ],
+  "historical_wrong_behavior": [
+    "system/audit 评论被当成真实阻塞语义，导致 running dispatch 被误抑制。",
+    "普通实现说明里的 current context / 上下文 文案被误判为 context_gap，历史 stuck 单无法恢复正常派发。"
+  ]
+}

@@ -23,6 +23,7 @@ export const WORKFLOW_STATUS_ORDER = [
   'blocked',
   'failed',
   'complete',
+  'deprecated',
 ];
 
 export const WORKFLOW_STATUS_META = {
@@ -41,7 +42,7 @@ export const WORKFLOW_STATUS_META = {
     chart_color: '#8b5cf6',
     default_actor_source: 'triage_owner',
     allow_manual_override: false,
-    sla: null,
+    sla: { key: 'stale_triage', default_minutes: 5 },
     notify_policy: {
       dispatch_ready: true,
       notification_ready: false,
@@ -63,7 +64,7 @@ export const WORKFLOW_STATUS_META = {
     chart_color: '#3b82f6',
     default_actor_source: 'assigned_agent',
     allow_manual_override: false,
-    sla: null,
+    sla: { key: 'queued_stale', default_minutes: 10 },
     notify_policy: {
       dispatch_ready: true,
       notification_ready: false,
@@ -107,7 +108,7 @@ export const WORKFLOW_STATUS_META = {
     chart_color: '#64748b',
     default_actor_source: 'paused_by',
     allow_manual_override: true,
-    sla: null,
+    sla: { key: 'stale_paused', default_minutes: 240 },
     notify_policy: {
       dispatch_ready: false,
       notification_ready: false,
@@ -129,7 +130,7 @@ export const WORKFLOW_STATUS_META = {
     chart_color: '#22c55e',
     default_actor_source: 'review_owner',
     allow_manual_override: true,
-    sla: null,
+    sla: { key: 'stale_done', default_minutes: 15 },
     notify_policy: {
       dispatch_ready: true,
       notification_ready: true,
@@ -151,7 +152,7 @@ export const WORKFLOW_STATUS_META = {
     chart_color: '#06b6d4',
     default_actor_source: 'review_owner',
     allow_manual_override: true,
-    sla: { key: 'stale_review', default_minutes: 10 },
+    sla: { key: 'stale_review', default_minutes: 60 },
     notify_policy: {
       dispatch_ready: true,
       notification_ready: true,
@@ -195,11 +196,11 @@ export const WORKFLOW_STATUS_META = {
     chart_color: '#f97316',
     default_actor_source: 'triage_owner',
     allow_manual_override: true,
-    sla: null,
+    sla: { key: 'stale_blocked', default_minutes: 240 },
     notify_policy: {
-      dispatch_ready: true,
-      notification_ready: false,
-      target: 'current_actor',
+      dispatch_ready: false,
+      notification_ready: true,
+      target: 'main_session',
     },
   },
   failed: {
@@ -219,7 +220,7 @@ export const WORKFLOW_STATUS_META = {
     allow_manual_override: true,
     sla: null,
     notify_policy: {
-      dispatch_ready: true,
+      dispatch_ready: false,
       notification_ready: true,
       target: 'main_session',
     },
@@ -244,6 +245,28 @@ export const WORKFLOW_STATUS_META = {
       dispatch_ready: false,
       notification_ready: true,
       target: 'main_session',
+    },
+  },
+  deprecated: {
+    key: 'deprecated',
+    label: '已废弃',
+    group: 'deprecated',
+    finality: 'closed',
+    is_terminal: true,
+    counts_as_closed: true,
+    read_only: true,
+    allow_create: true,
+    board_order: 10,
+    badge_class: 'bg-zinc-500/20 text-zinc-300 border-zinc-500/50',
+    column_class: 'bg-[var(--bg-secondary)] border-zinc-500',
+    chart_color: '#71717a',
+    default_actor_source: null,
+    allow_manual_override: false,
+    sla: null,
+    notify_policy: {
+      dispatch_ready: false,
+      notification_ready: false,
+      target: 'none',
     },
   },
 };
@@ -292,7 +315,7 @@ export const WORKFLOW_TRANSITION_META = {
   request_decision: {
     key: 'request_decision',
     label: '🤔 请求决策',
-    from: ['running', 'review'],
+    from: ['queued', 'running', 'review'],
     to: 'pending_decision',
     required_fields: ['actor', 'decision_summary'],
     role_key: 'assigned_agent',
@@ -341,7 +364,7 @@ export const WORKFLOW_TRANSITION_META = {
   block: {
     key: 'block',
     label: '🚫 标记阻塞',
-    from: ['running'],
+    from: ['queued', 'running'],
     to: 'blocked',
     required_fields: ['actor', 'blocker_summary'],
     role_key: 'assigned_agent',
@@ -357,10 +380,19 @@ export const WORKFLOW_TRANSITION_META = {
   fail: {
     key: 'fail',
     label: '❌ 标记失败',
-    from: ['running'],
+    from: ['queued', 'running'],
     to: 'failed',
     required_fields: ['actor', 'error'],
     role_key: 'assigned_agent',
+  },
+  deprecate: {
+    key: 'deprecate',
+    label: '🗃️ 标记废弃',
+    from: ['triage', 'queued', 'running', 'paused', 'done', 'review', 'pending_decision', 'blocked', 'failed', 'complete'],
+    to: 'deprecated',
+    required_fields: ['actor', 'deprecation_reason'],
+    role_key: 'triage_owner',
+    management_only: true,
   },
   resume_from_decision: {
     key: 'resume_from_decision',
@@ -474,6 +506,7 @@ function computeCurrentActorWithoutOverride(ticket = {}) {
 
   switch (status) {
     case 'complete':
+    case 'deprecated':
       return { current_actor: null, current_actor_source: null };
     case 'triage':
       return { current_actor: triageOwner, current_actor_source: triageOwner ? 'triage_owner' : null };
@@ -641,6 +674,7 @@ export const WORKFLOW_BUCKET_LABELS = {
   waiting_decision: '待决策',
   blocked: '阻塞',
   paused: '暂时挂起',
+  deprecated: '已废弃',
   closed: '已结束',
 };
 
@@ -650,7 +684,8 @@ export const WORKFLOW_BUCKET_ORDER = {
   waiting_decision: 2,
   blocked: 3,
   paused: 4,
-  closed: 5,
+  deprecated: 5,
+  closed: 6,
 };
 
 export const WORKFLOW_BUCKET_META = (() => {

@@ -1,0 +1,44 @@
+{
+  "fixture_id": "dispatch-receipt-accepted-bridge-to-running",
+  "fixture_type": "dispatch-receipt-bridge",
+  "version": "v1",
+  "summary": "固化 queued assignment 在 dispatch_receipt.accepted 后桥接到 running 的 hosted contract。",
+  "source_refs": [
+    "api/app.test.js",
+    "docs/API.md",
+    "docs/reference/api.md",
+    "docs/ticket-processing-flow-v1.md"
+  ],
+  "input": {
+    "report_type": "dispatch_receipt",
+    "receipt": {
+      "dispatch_id": "<queued_dispatch_id>",
+      "ticket_id": "<ticket_id>",
+      "stage": "queued",
+      "agent": "beavy",
+      "decision": "accepted"
+    }
+  },
+  "expected": {
+    "assignment_status_after_report": "in_progress",
+    "transition_preview": {
+      "action": "start_work",
+      "suggested_status": "running",
+      "applied": true,
+      "bridge_actions": [
+        "start_work"
+      ]
+    },
+    "ticket_status_after": "running",
+    "comment_contract": {
+      "author": "beavy",
+      "type": "progress",
+      "content_contains": "【agent_report】dispatch_receipt"
+    },
+    "receipt_required_before_running": true
+  },
+  "historical_wrong_behavior": [
+    "平台只记录 dispatch_receipt，但没有把 queued 正式桥接到 running。",
+    "running 桥接发生了，但没有回出 transition_preview / bridge action，导致 contract 难以被自动回归校验。"
+  ]
+}

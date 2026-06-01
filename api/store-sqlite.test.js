@@ -5,12 +5,13 @@
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import * as store from './store-sqlite.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DIR = path.join(__dirname, 'data');
+const ORIGINAL_DB_PATH = process.env.TICKETS_DB_PATH;
 
 describe('store-sqlite', () => {
   beforeEach(() => {
@@ -18,6 +19,19 @@ describe('store-sqlite', () => {
     const uniqueDb = path.join(TEST_DIR, `test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
     process.env.TICKETS_DB_PATH = uniqueDb;
     store._resetDbForTesting();
+  });
+
+  afterEach(() => {
+    const dbPath = process.env.TICKETS_DB_PATH;
+    store._resetDbForTesting();
+    for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      if (p && fs.existsSync(p)) fs.rmSync(p, { force: true });
+    }
+    if (ORIGINAL_DB_PATH) {
+      process.env.TICKETS_DB_PATH = ORIGINAL_DB_PATH;
+    } else {
+      delete process.env.TICKETS_DB_PATH;
+    }
   });
 
   it('getAllTickets 空库返回 []', () => {
@@ -211,6 +225,87 @@ describe('store-sqlite', () => {
     expect(detail.pause_reason).toBe('等待窗口期后继续');
   });
 
+  it('支持 participant registry 持久化与读取', () => {
+    store.upsertParticipantRegistryEntry({
+      participant_id: 'beavy',
+      display_name: '小李',
+      emoji: '🦫',
+      participant_type: 'agent',
+      role_type: 'builder',
+      ownership_layer: 'development',
+      primary_platform: 'ticket-platform',
+      responsibilities: ['development'],
+      collaborates_with: ['leoss'],
+      responsibility_summary: '负责实现与回归',
+      gateway_id: 'mac-main',
+      source_kind: 'manual',
+      status: {
+        availability_status: 'paused',
+        eligibility_status: 'limited',
+        accepts_assignment_types: ['bugfix', 'feature'],
+        status_reason: '正在回归窗口',
+        metadata: { source: 'test' },
+      },
+      capabilities: ['development', 'review_assist'],
+    });
+
+    const detail = store.getParticipantRegistryEntry('beavy');
+    expect(detail).toEqual(expect.objectContaining({
+      participant_id: 'beavy',
+      display_name: '小李',
+      source_kind: 'manual',
+      capabilities: expect.arrayContaining(['development', 'review_assist']),
+      status: expect.objectContaining({
+        availability_status: 'paused',
+        eligibility_status: 'limited',
+        accepts_assignment_types: ['bugfix', 'feature'],
+      }),
+    }));
+
+    const rows = store.listParticipantRegistryEntries();
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ participant_id: 'beavy' }),
+    ]));
+  });
+
+  it('syncParticipantRegistryFromTopology 不覆盖已持久化动态状态', () => {
+    store.upsertParticipantRegistryEntry({
+      participant_id: 'beavy',
+      display_name: '小李',
+      primary_platform: 'ticket-platform',
+      responsibilities: ['development'],
+      gateway_id: 'mac-main',
+      source_kind: 'manual',
+      status: {
+        availability_status: 'unavailable',
+        eligibility_status: 'blocked',
+        accepts_assignment_types: ['hotfix'],
+        status_reason: '休假中',
+      },
+      capabilities: ['manual_override'],
+    });
+
+    store.syncParticipantRegistryFromTopology([
+      {
+        participant_id: 'beavy',
+        display_name: '小李',
+        primary_platform: 'ticket-platform',
+        responsibilities: ['development'],
+        gateway_id: 'mac-main',
+        source_kind: 'topology',
+      },
+    ]);
+
+    const detail = store.getParticipantRegistryEntry('beavy');
+    expect(detail.status).toEqual(expect.objectContaining({
+      availability_status: 'unavailable',
+      eligibility_status: 'blocked',
+      accepts_assignment_types: ['hotfix'],
+      status_reason: '休假中',
+    }));
+    expect(detail.capabilities).toEqual(expect.arrayContaining(['manual_override']));
+  });
+
   it('支持基础父子工单关系读取', () => {
     const parent = store.createTicket({ title: 'Parent', description: 'root' });
     const child = store.createTicket({
@@ -387,6 +482,44 @@ describe('store-sqlite', () => {
     expect(w.finished_at).toBeDefined();
   });
 
+  it('findLatestAssignmentForTicket 按创建顺序返回 replacement assignment，不受旧 assignment updated_at 影响', () => {
+    const ticket = store.createTicket({
+      title: 'Latest assignment should follow replacement order',
+      status: 'running',
+      assigned_agent: 'beavy',
+    });
+
+    const oldAssignment = store.createOrReuseAssignment({
+      ticket_id: ticket.id,
+      dispatch_event_id: 101,
+      agent_id: 'beavy',
+      stage: 'queued',
+      assignment_status: 'created',
+      target_session_key: 'agent:beavy:ticket:old',
+      transport: 'test',
+    });
+
+    const replacementAssignment = store.createOrReuseAssignment({
+      ticket_id: ticket.id,
+      dispatch_event_id: 102,
+      agent_id: 'beavy',
+      stage: 'running',
+      assignment_status: 'created',
+      target_session_key: 'agent:beavy:ticket:new',
+      transport: 'test',
+    });
+
+    store.updateAssignment(oldAssignment.assignment_id, {
+      assignment_status: 'in_progress',
+      stage: 'queued',
+    });
+
+    const latest = store.findLatestAssignmentForTicket(ticket.id, 'beavy');
+    expect(latest.assignment_id).toBe(replacementAssignment.assignment_id);
+    expect(latest.dispatch_event_id).toBe(102);
+    expect(latest.stage).toBe('running');
+  });
+
   it('stale starting worker（无 session_key/run_id 或 无新鲜 heartbeat）不计入 active，不压制 dispatch', () => {
     const t = store.createTicket({
       title: 'Stale starting',
@@ -444,5 +577,49 @@ describe('store-sqlite', () => {
         status: 'running',
       })
     ).toThrow(/活跃 worker 已达到上限/);
+  });
+
+  it('participant registry 可从 sqlite 持久化读取状态与能力字段', () => {
+    store.upsertParticipantRegistryEntry({
+      participant_id: 'beavy',
+      display_name: '小李',
+      emoji: '🦫',
+      participant_type: 'agent',
+      role_type: 'builder',
+      ownership_layer: 'development',
+      primary_platform: 'ticket-platform',
+      responsibilities: ['development'],
+      collaborates_with: ['leoss'],
+      responsibility_summary: '工单平台开发执行人',
+      gateway_id: 'mac-main',
+      source_kind: 'manual',
+      status: {
+        availability_status: 'busy',
+        eligibility_status: 'restricted',
+        accepts_assignment_types: ['bugfix', 'migration'],
+        status_reason: 'focused migration',
+        effective_from: '2026-03-20T00:00:00.000Z',
+        metadata: { lane: 'v2' },
+      },
+      capabilities: ['ticket:read', 'ticket:write'],
+    });
+
+    const entry = store.getParticipantRegistryEntry('beavy');
+    expect(entry).toEqual(expect.objectContaining({
+      participant_id: 'beavy',
+      source_kind: 'manual',
+      primary_platform: 'ticket-platform',
+      status: expect.objectContaining({
+        availability_status: 'busy',
+        eligibility_status: 'restricted',
+        accepts_assignment_types: ['bugfix', 'migration'],
+        status_reason: 'focused migration',
+        metadata: expect.objectContaining({ lane: 'v2' }),
+      }),
+      capabilities: ['ticket:read', 'ticket:write'],
+    }));
+
+    const listed = store.listParticipantRegistryEntries();
+    expect(listed.map((item) => item.participant_id)).toContain('beavy');
   });
 });

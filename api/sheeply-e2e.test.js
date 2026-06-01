@@ -6,7 +6,7 @@ import './test-setup-sheeply-e2e.js';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import app from './app.js';
 import { _resetDbForTesting } from './store-sqlite.js';
@@ -30,6 +30,10 @@ describe('dispatch/notifications ready/ack e2e (direct-drive)', () => {
     ensureCleanStore();
   });
 
+  afterEach(() => {
+    ensureCleanStore();
+  });
+
   it('打通 dispatch ready -> ack -> review dispatch -> complete notification -> ack', async () => {
     const createRes = await request(app)
       .post('/api/tickets')
@@ -43,6 +47,11 @@ describe('dispatch/notifications ready/ack e2e (direct-drive)', () => {
       .expect(201);
 
     const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'queue', actor: 'leoss' })
+      .expect(200);
 
     const dispatchReady1 = await request(app)
       .get('/api/dispatch/ready')
@@ -111,7 +120,8 @@ describe('dispatch/notifications ready/ack e2e (direct-drive)', () => {
     }));
 
     await request(app)
-      .post(`/api/notifications/${notifyReady.body.ready[0].event_id}/ack`)
+      .post('/api/notifications/ack')
+      .send({ event_id: notifyReady.body.ready[0].event_id })
       .expect(200);
 
     const notifyReadyAfterAck = await request(app)
@@ -134,6 +144,11 @@ describe('dispatch/notifications ready/ack e2e (direct-drive)', () => {
       .expect(201);
 
     const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'queue', actor: 'leoss' })
+      .expect(200);
 
     await request(app)
       .post(`/api/tickets/${ticketId}/transition`)
@@ -166,7 +181,69 @@ describe('dispatch/notifications ready/ack e2e (direct-drive)', () => {
     }));
 
     await request(app)
-      .post(`/api/notifications/${notifyReady.body.ready[0].event_id}/ack`)
+      .post('/api/notifications/ack')
+      .send({ event_id: notifyReady.body.ready[0].event_id })
+      .expect(200);
+
+    const afterAck = await request(app)
+      .get('/api/notifications/ready')
+      .expect(200);
+    expect(afterAck.body.ready).toHaveLength(0);
+  });
+
+  it('打通 blocked 通知 ready -> ack 闭环（且不进入 dispatch ready）', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Blocked needs boss attention',
+        description: 'Need external coordination',
+        assigned_agent: 'beavy',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        decision_owner: '荣晖',
+      })
+      .expect(201);
+
+    const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'queue', actor: 'leoss' })
+      .expect(200);
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'start_work', actor: 'beavy' })
+      .expect(200);
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({
+        action: 'block',
+        actor: 'beavy',
+        blocker_summary: '需要老大协调外部依赖',
+      })
+      .expect(200);
+
+    const dispatchReady = await request(app)
+      .get('/api/dispatch/ready')
+      .expect(200);
+    expect(dispatchReady.body.ready.find((item) => item.ticket_id === ticketId)).toBeUndefined();
+
+    const notifyReady = await request(app)
+      .get('/api/notifications/ready')
+      .expect(200);
+
+    expect(notifyReady.body.ready).toHaveLength(1);
+    expect(notifyReady.body.ready[0]).toEqual(expect.objectContaining({
+      ticket_id: ticketId,
+      type: 'blocked',
+      status: 'blocked',
+    }));
+
+    await request(app)
+      .post('/api/notifications/ack')
+      .send({ event_id: notifyReady.body.ready[0].event_id })
       .expect(200);
 
     const afterAck = await request(app)
@@ -189,6 +266,11 @@ describe('dispatch/notifications ready/ack e2e (direct-drive)', () => {
       .expect(201);
 
     const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'queue', actor: 'leoss' })
+      .expect(200);
 
     await request(app)
       .post(`/api/tickets/${ticketId}/transition`)
@@ -220,7 +302,8 @@ describe('dispatch/notifications ready/ack e2e (direct-drive)', () => {
     }));
 
     await request(app)
-      .post(`/api/dispatch/${dispatchReady.body.ready[0].dispatch_id}/ack`)
+      .post('/api/dispatch/ack')
+      .send({ dispatch_id: dispatchReady.body.ready[0].dispatch_id })
       .expect(200);
 
     const afterAck = await request(app)

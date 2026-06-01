@@ -1,61 +1,23 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { Search, Plus, Activity, TrendingUp, AlertCircle, Clock, CheckCircle, XCircle, Zap, List, Inbox, RefreshCw, Trash2, ArrowUpDown, ChevronUp, ChevronDown } from 'lucide-react';
-import { fetchTickets, fetchBots, fetchTicketStatus, createTicket, deleteTicket, deleteTickets, fetchTicketDependencies } from '../api/tickets';
+import { Search, Plus, Activity, TrendingUp, AlertCircle, Clock, Inbox, RefreshCw, Trash2, ArrowUpDown, ChevronUp, ChevronDown, ExternalLink, CheckCircle2 } from 'lucide-react';
+import { fetchTickets, fetchStockAdminTickets, fetchTicketStatus, createTicket, createStockAdminTicket, deleteTicket, deleteTickets } from '../api/tickets';
 import LoadingState from '../components/LoadingState';
 import ErrorState from '../components/ErrorState';
-
-// 依赖关系展示组件
-function TicketDependencies({ ticketId }) {
-  const [deps, setDeps] = useState({ dependencies: [], dependents: [] });
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let mounted = true;
-    fetchTicketDependencies(ticketId)
-      .then((data) => {
-        if (mounted) {
-          setDeps(data);
-          setLoading(false);
-        }
-      })
-      .catch(() => {
-        if (mounted) {
-          setDeps({ dependencies: [], dependents: [] });
-          setLoading(false);
-        }
-      });
-    return () => { mounted = false; };
-  }, [ticketId]);
-
-  if (loading) {
-    return <span className="text-xs text-[var(--text-secondary)]">...</span>;
-  }
-
-  const depCount = deps.dependencies.length;
-  const depentCount = deps.dependents.length;
-
-  if (depCount === 0 && depentCount === 0) {
-    return <span className="text-xs text-[var(--text-secondary)]">—</span>;
-  }
-
-  return (
-    <div className="flex items-center gap-2 text-xs">
-      {depCount > 0 && (
-        <span className="inline-flex items-center gap-1 px-2 py-1 rounded border border-orange-500/40 bg-orange-500/10 text-orange-300" title={`依赖 ${depCount} 个工单`}>
-          🔗 {depCount}
-        </span>
-      )}
-      {depentCount > 0 && (
-        <span className="inline-flex items-center gap-1 px-2 py-1 rounded border border-blue-500/40 bg-blue-500/10 text-blue-300" title={`被 ${depentCount} 个工单依赖`}>
-          ⬅️ {depentCount}
-        </span>
-      )}
-    </div>
-  );
-}
+import { STATUS_BADGE_CLASS, STATUS_SORT_ORDER, getStatusLabel } from '../../workflow-schema.js';
+import { buildTicketListSummary, buildTicketQuickViews, buildTicketStageGateStatus, buildTicketStageOrchestration, buildTicketViewModel, matchesTicketQuickView } from '../../ticket-selectors.js';
 
 const DEFAULT_SORT = { key: 'created', direction: 'desc' };
+const STOCK_ADMIN_TOKEN_STORAGE_KEY = 'stock-admin-token';
+const FALLBACK_AGENT_OPTIONS = ['beavy', 'cowder', 'donky', 'marely', 'auditor', 'doggy'];
+const AGENT_META = {
+  beavy: { emoji: '🦫', displayName: '小李' },
+  cowder: { emoji: '🐮', displayName: '小牛' },
+  donky: { emoji: '🫏', displayName: '小驴' },
+  marely: { emoji: '🐴', displayName: '小马' },
+  auditor: { emoji: '🧭', displayName: '审计员' },
+  doggy: { emoji: '🐶', displayName: '小狗' },
+};
 
 function parseTimestamp(value) {
   const ts = Date.parse(value || '');
@@ -76,8 +38,7 @@ function compareTickets(a, b, key) {
     case 'title':
       return compareText(a.title, b.title);
     case 'status': {
-      const order = { triage: 0, queued: 1, running: 2, review: 3, blocked: 4, failed: 5, done: 6, complete: 7, pending_decision: 8, open: 1, 'in-progress': 2, resolved: 6, closed: 7 };
-      const diff = (order[a.status] ?? 99) - (order[b.status] ?? 99);
+      const diff = (STATUS_SORT_ORDER[a.status] ?? 99) - (STATUS_SORT_ORDER[b.status] ?? 99);
       return diff !== 0 ? diff : compareText(a.status, b.status);
     }
     case 'agent':
@@ -117,19 +78,26 @@ function formatDateTime(value) {
 }
 
 function normalizeTickets(payload) {
-  const raw = Array.isArray(payload) ? payload : (payload?.tickets ?? payload?.data ?? []);
-  const arr = Array.isArray(raw) ? raw : [];
-  return sortTicketsNewestFirst(arr.map((t) => ({
+  const raw = Array.isArray(payload)
+    ? payload
+    : (payload?.tickets ?? payload?.data?.items ?? payload?.data ?? []);
+  const arr = (Array.isArray(raw) ? raw : []).filter((item) => item && typeof item === 'object');
+  const normalized = arr.map((t) => ({
     id: t.id,
     title: t.title ?? '',
     status: t.status ?? 'queued',
     priority: t.priority ?? 'medium',
     bot: t.bot ?? t.assigned_agent ?? null,
     triage_owner: t.triage_owner ?? null,
+    review_owner: t.review_owner ?? null,
+    decision_owner: t.decision_owner ?? null,
     assigned_agent: t.assigned_agent ?? t.bot ?? null,
+    current_actor: t.current_actor ?? null,
+    current_actor_source: t.current_actor_source ?? null,
     next_actor: t.next_actor ?? null,
     next_actor_override: t.next_actor_override ?? null,
     next_actor_source: t.next_actor_source ?? null,
+    manual_override_active: Boolean(t.manual_override_active),
     should_notify: Boolean(t.should_notify),
     session_key: t.session_key ?? null,
     created: t.created ?? '',
@@ -139,29 +107,21 @@ function normalizeTickets(payload) {
     platform: t.platform ?? null,
     request_type: t.request_type ?? null,
     triage_summary: t.triage_summary ?? '',
-  })));
-}
-
-function normalizeBots(payload) {
-  const raw = Array.isArray(payload) ? payload : (payload?.bots ?? payload?.data ?? []);
-  const arr = Array.isArray(raw) ? raw : [];
-  return arr.map((b) => ({
-    name: b.name ?? '',
-    displayName: b.displayName ?? b.name ?? '',
-    status: b.status ?? 'idle',
-    tokens: b.tokens ?? '0k/0k',
-    usage: typeof b.usage === 'number' ? b.usage : 0,
-    emoji: b.emoji ?? '🤖',
-    currentTask: b.currentTask ?? null,
-    queue: Array.isArray(b.queue) ? b.queue : [],
-    stats: {
-      todayCompleted: b.stats?.todayCompleted ?? 0,
-      avgResponseTime: b.stats?.avgResponseTime ?? '—',
-      successRate: b.stats?.successRate ?? 0,
-      uptime: b.stats?.uptime ?? '—',
+    result_summary: t.result_summary ?? null,
+    execution_mode: t.execution_mode ?? null,
+    dispatch_state: t.dispatch_state ?? null,
+    awaiting_receipt_from: t.awaiting_receipt_from ?? null,
+    execution_guard: t.execution_guard ?? null,
+    paused_by: t.paused_by ?? null,
+    paused_from_status: t.paused_from_status ?? null,
+    pause_reason: t.pause_reason ?? null,
+    dependency_summary: {
+      dependency_count: t.dependency_summary?.dependency_count ?? 0,
+      dependent_count: t.dependency_summary?.dependent_count ?? 0,
     },
-    recentTasks: Array.isArray(b.recentTasks) ? b.recentTasks : [],
   }));
+
+  return sortTicketsNewestFirst(normalized.map((t) => buildTicketViewModel(t)));
 }
 
 function truncate(str, len = 12) {
@@ -174,43 +134,15 @@ function truncateSessionKey(s, max = 12) {
   return s.length <= max ? s : s.slice(0, max) + '…';
 }
 
-const QUICK_VIEW_CONFIG = {
-  all: { label: '全部工单' },
-  triagePending: { label: '待分诊' },
-  ticketPlatform: { label: '只看工单平台' },
-  beavy: { label: '只看 beavy' },
-  triageIncomplete: { label: '分诊待补全' },
+const STATUS_LABELS = {
+  open: 'OPEN',
+  'in-progress': 'IN_PROGRESS',
+  resolved: 'RESOLVED',
+  closed: 'CLOSED',
 };
 
 function normalizeFilterValue(value) {
   return typeof value === 'string' ? value.trim() : '';
-}
-
-function hasTriageGap(ticket) {
-  const requiredFields = [
-    ticket.triage_owner,
-    ticket.platform,
-    ticket.request_type,
-    ticket.assigned_agent,
-    ticket.triage_summary,
-  ];
-  return requiredFields.some((value) => normalizeFilterValue(value).length === 0);
-}
-
-function matchesQuickView(ticket, quickView) {
-  switch (quickView) {
-    case 'triagePending':
-      return ticket.status === 'triage';
-    case 'ticketPlatform':
-      return ticket.platform === 'ticket-platform';
-    case 'beavy':
-      return ticket.assigned_agent === 'beavy';
-    case 'triageIncomplete':
-      return hasTriageGap(ticket);
-    case 'all':
-    default:
-      return true;
-  }
 }
 
 function buildFilterOptions(values = []) {
@@ -223,18 +155,88 @@ function renderFieldValue(value) {
   return text || '—';
 }
 
+function getAgentMeta(agentName) {
+  const normalized = normalizeFilterValue(agentName);
+  if (!normalized) return null;
+  return {
+    name: normalized,
+    displayName: AGENT_META[normalized]?.displayName || normalized,
+    emoji: AGENT_META[normalized]?.emoji || '🤖',
+  };
+}
+
+function TicketDependencies({ summary }) {
+  const depCount = Number(summary?.dependency_count) || 0;
+  const dependentCount = Number(summary?.dependent_count) || 0;
+
+  if (depCount === 0 && dependentCount === 0) {
+    return <span className="text-xs text-[var(--text-secondary)]">—</span>;
+  }
+
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      {depCount > 0 && (
+        <span className="inline-flex items-center gap-1 rounded border border-orange-500/40 bg-orange-500/10 px-2 py-1 text-orange-300" title={`依赖 ${depCount} 个工单`}>
+          🔗 {depCount}
+        </span>
+      )}
+      {dependentCount > 0 && (
+        <span className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-blue-500/10 px-2 py-1 text-blue-300" title={`被 ${dependentCount} 个工单依赖`}>
+          ⬅️ {dependentCount}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function isReviewerInboxTicket(ticket) {
+  return ['done', 'review', 'pending_decision'].includes(ticket.status);
+}
+
+function getInitialStockAdminToken() {
+  if (typeof window === 'undefined') return '';
+  return window.localStorage.getItem(STOCK_ADMIN_TOKEN_STORAGE_KEY) || '';
+}
+
+function persistStockAdminToken(token) {
+  if (typeof window === 'undefined') return;
+  if (token) {
+    window.localStorage.setItem(STOCK_ADMIN_TOKEN_STORAGE_KEY, token);
+    return;
+  }
+  window.localStorage.removeItem(STOCK_ADMIN_TOKEN_STORAGE_KEY);
+}
+
+function getReviewerLaneMeta(ticket) {
+  if (ticket.status === 'pending_decision') {
+    return {
+      tone: 'border-purple-500/40 bg-purple-500/10 text-purple-200',
+      label: '待老大决策',
+      hint: ticket.decision_summary || ticket.triage_summary || '等待 decision owner 拍板',
+    };
+  }
+
+  return {
+    tone: 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200',
+    label: ticket.status === 'review' ? 'reviewer 验收中' : 'reviewer 待收口',
+    hint: ticket.result_summary || ticket.triage_summary || '等待 reviewer 收口',
+  };
+}
+
 const Tickets = () => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedBot, setSelectedBot] = useState(null);
   const [tickets, setTickets] = useState([]);
-  const [bots, setBots] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshingId, setRefreshingId] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [stockAdminMode, setStockAdminMode] = useState(false);
+  const [stockAdminToken, setStockAdminToken] = useState(getInitialStockAdminToken);
   const [createTitle, setCreateTitle] = useState('');
   const [createDesc, setCreateDesc] = useState('');
   const [createAgent, setCreateAgent] = useState('donky');
+  const [createTriageOwner, setCreateTriageOwner] = useState('leoss');
+  const [createReviewOwner, setCreateReviewOwner] = useState('leoss');
   const [createLoading, setCreateLoading] = useState(false);
   const [createError, setCreateError] = useState(null);
   const [sortConfig, setSortConfig] = useState(DEFAULT_SORT);
@@ -250,29 +252,29 @@ const Tickets = () => {
     setLoading(true);
     setError(null);
     try {
-      const [ticketsRes, botsRes] = await Promise.all([
-        fetchTickets(),
-        fetchBots(),
-      ]);
+      const ticketsRes = stockAdminMode
+        ? await fetchStockAdminTickets(stockAdminToken)
+        : await fetchTickets();
       setTickets(normalizeTickets(ticketsRes));
-      setBots(normalizeBots(botsRes));
     } catch (err) {
       setError(err?.message || '加载工单列表失败，请稍后重试');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [stockAdminMode, stockAdminToken]);
+
+  useEffect(() => {
+    persistStockAdminToken(stockAdminToken.trim());
+  }, [stockAdminToken]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
-  const stats = useMemo(() => ({
-    total: tickets.length,
-    open: tickets.filter((t) => ['triage', 'queued', 'review', 'blocked', 'failed'].includes(t.status)).length,
-    inProgress: tickets.filter((t) => t.status === 'running').length,
-    activeBots: bots.filter((b) => b.status === 'active').length,
-  }), [tickets, bots]);
+  const stats = useMemo(
+    () => buildTicketListSummary(tickets),
+    [tickets]
+  );
 
   const platformOptions = useMemo(
     () => buildFilterOptions(tickets.map((ticket) => ticket.platform)),
@@ -287,17 +289,18 @@ const Tickets = () => {
   const assignedAgentOptions = useMemo(
     () => buildFilterOptions([
       ...tickets.map((ticket) => ticket.assigned_agent),
-      ...bots.map((bot) => bot.name),
+      ...FALLBACK_AGENT_OPTIONS,
     ]),
-    [tickets, bots]
+    [tickets]
   );
 
   const quickViews = useMemo(
-    () => Object.entries(QUICK_VIEW_CONFIG).map(([key, config]) => ({
-      key,
-      label: config.label,
-      count: tickets.filter((ticket) => matchesQuickView(ticket, key)).length,
-    })),
+    () => buildTicketQuickViews(tickets),
+    [tickets]
+  );
+
+  const reviewerInboxTickets = useMemo(
+    () => tickets.filter((ticket) => isReviewerInboxTicket(ticket)),
     [tickets]
   );
 
@@ -306,23 +309,16 @@ const Tickets = () => {
     [searchTerm, platformFilter, requestTypeFilter, assignedAgentFilter, quickView]
   );
 
-  const getStatusColor = (status) => {
-    const colors = {
-      triage: 'bg-violet-500/20 text-violet-300 border-violet-500/50',
-      queued: 'bg-blue-500/20 text-blue-400 border-blue-500/50',
-      running: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50',
-      review: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50',
-      blocked: 'bg-orange-500/20 text-orange-300 border-orange-500/50',
-      done: 'bg-green-500/20 text-green-400 border-green-500/50',
-      failed: 'bg-red-500/20 text-red-400 border-red-500/50',
-      complete: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50',
-      pending_decision: 'bg-purple-500/20 text-purple-300 border-purple-500/50',
+  const getStatusColor = (ticket) => {
+    const status = ticket.status;
+    const metaClass = ticket.status_meta?.badge_class;
+    const fallback = {
       open: 'bg-blue-500/20 text-blue-400 border-blue-500/50',
       'in-progress': 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50',
       resolved: 'bg-green-500/20 text-green-400 border-green-500/50',
       closed: 'bg-gray-500/20 text-gray-400 border-gray-500/50',
     };
-    return colors[status] || 'bg-gray-500/20 text-gray-400 border-gray-500/50';
+    return metaClass || STATUS_BADGE_CLASS[status] || fallback[status] || 'bg-gray-500/20 text-gray-400 border-gray-500/50';
   };
 
   const getPriorityIcon = (priority) => {
@@ -348,7 +344,7 @@ const Tickets = () => {
       const matchesPlatformFilter = platformFilter === 'all' || ticket.platform === platformFilter;
       const matchesRequestTypeFilter = requestTypeFilter === 'all' || ticket.request_type === requestTypeFilter;
       const matchesAssignedAgentFilter = assignedAgentFilter === 'all' || ticket.assigned_agent === assignedAgentFilter;
-      const matchesPresetView = matchesQuickView(ticket, quickView);
+      const matchesPresetView = matchesTicketQuickView(ticket, quickView);
 
       return matchesSearch && matchesPlatformFilter && matchesRequestTypeFilter && matchesAssignedAgentFilter && matchesPresetView;
     });
@@ -357,6 +353,11 @@ const Tickets = () => {
   const visibleTickets = useMemo(
     () => sortTickets(filteredTickets, sortConfig),
     [filteredTickets, sortConfig]
+  );
+
+  const visibleTicketOrchestrations = useMemo(
+    () => Object.fromEntries(visibleTickets.map((ticket) => [ticket.id, buildTicketStageOrchestration(ticket)])),
+    [visibleTickets]
   );
 
   const allVisibleSelected = useMemo(
@@ -384,27 +385,43 @@ const Tickets = () => {
 
   const handleCreateTicket = useCallback(async () => {
     if (!createTitle.trim()) return;
+    if (stockAdminMode && !stockAdminToken.trim()) {
+      setCreateError('请先填写 cowder 的 stock admin token');
+      return;
+    }
     setCreateLoading(true);
     setCreateError(null);
     try {
-      const created = await createTicket({
-        title: createTitle.trim(),
-        description: createDesc.trim(),
-        agent: createAgent,
-        status: 'triage',
-        triage_owner: 'leoss',
-      });
-      setTickets((prev) => sortTicketsNewestFirst([...normalizeTickets([created]), ...prev]));
+      const created = stockAdminMode
+        ? await createStockAdminTicket(stockAdminToken.trim(), {
+            title: createTitle.trim(),
+            description: createDesc.trim(),
+            assigned_agent: createAgent,
+            triage_owner: createTriageOwner.trim() || undefined,
+            review_owner: createReviewOwner.trim() || undefined,
+          })
+        : await createTicket({
+            title: createTitle.trim(),
+            description: createDesc.trim(),
+            assigned_agent: createAgent,
+            status: 'triage',
+            triage_owner: createTriageOwner.trim() || undefined,
+            review_owner: createReviewOwner.trim() || undefined,
+          });
+      const createdTicket = stockAdminMode ? created?.ticket : created;
+      setTickets((prev) => sortTicketsNewestFirst([...normalizeTickets([createdTicket]), ...prev]));
       setShowCreate(false);
       setCreateTitle('');
       setCreateDesc('');
-      setCreateAgent('donky');
+      setCreateAgent(stockAdminMode ? 'cowder' : 'donky');
+      setCreateTriageOwner(stockAdminMode ? 'cowder' : 'leoss');
+      setCreateReviewOwner(stockAdminMode ? 'cowder' : 'leoss');
     } catch (err) {
       setCreateError(err?.message || '创建工单失败，请稍后重试');
     } finally {
       setCreateLoading(false);
     }
-  }, [createTitle, createDesc, createAgent]);
+  }, [createTitle, createDesc, createAgent, createTriageOwner, createReviewOwner, stockAdminMode, stockAdminToken]);
 
   const handleDeleteTicket = useCallback(async (ticketId) => {
     if (!window.confirm('确定要删除这个工单吗？')) return;
@@ -477,7 +494,7 @@ const Tickets = () => {
     setQuickView('all');
   }, []);
 
-  if (loading) {
+  if (loading && tickets.length === 0) {
     return (
       <div className="flex gap-6 animate-slide-in">
         <div className="flex-1">
@@ -487,7 +504,7 @@ const Tickets = () => {
     );
   }
 
-  if (error) {
+  if (error && tickets.length === 0) {
     return (
       <div className="flex gap-6 animate-slide-in">
         <div className="flex-1">
@@ -516,6 +533,7 @@ const Tickets = () => {
                 <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">标题 *</label>
                 <input
                   type="text"
+                  aria-label="标题 *"
                   value={createTitle}
                   onChange={(e) => setCreateTitle(e.target.value)}
                   placeholder="输入工单标题"
@@ -526,6 +544,7 @@ const Tickets = () => {
               <div>
                 <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">描述</label>
                 <textarea
+                  aria-label="描述"
                   value={createDesc}
                   onChange={(e) => setCreateDesc(e.target.value)}
                   placeholder="输入工单描述（可选）"
@@ -541,16 +560,46 @@ const Tickets = () => {
               <div>
                 <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">预指派执行人 *</label>
                 <select
+                  aria-label="预指派执行人 *"
                   value={createAgent}
                   onChange={(e) => setCreateAgent(e.target.value)}
                   className="w-full px-4 py-2 bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded-lg text-[var(--text-primary)] focus:border-[var(--accent-primary)] focus:outline-none"
                 >
-                  {bots.map((bot) => (
-                    <option key={bot.name} value={bot.name}>
-                      {bot.emoji} {bot.displayName} ({bot.name})
-                    </option>
-                  ))}
+                  {assignedAgentOptions.map((agentName) => {
+                    const agentMeta = getAgentMeta(agentName);
+                    return (
+                      <option key={agentName} value={agentName}>
+                        {agentMeta ? `${agentMeta.emoji} ${agentMeta.displayName} (${agentName})` : agentName}
+                      </option>
+                    );
+                  })}
                 </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">分诊负责人</label>
+                <input
+                  type="text"
+                  aria-label="分诊负责人"
+                  value={createTriageOwner}
+                  onChange={(e) => setCreateTriageOwner(e.target.value)}
+                  placeholder="留空则按平台默认路由"
+                  className="w-full px-4 py-2 bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded-lg text-[var(--text-primary)] placeholder-[var(--text-secondary)] focus:border-[var(--accent-primary)] focus:outline-none"
+                />
+                <p className="mt-2 text-xs text-[var(--text-secondary)] font-mono">human/control-ui create 可受控指定 triage_owner；未填写时回退到平台默认责任人。</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">验收负责人</label>
+                <input
+                  type="text"
+                  aria-label="验收负责人"
+                  value={createReviewOwner}
+                  onChange={(e) => setCreateReviewOwner(e.target.value)}
+                  placeholder="留空则回退到 triage_owner"
+                  className="w-full px-4 py-2 bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded-lg text-[var(--text-primary)] placeholder-[var(--text-secondary)] focus:border-[var(--accent-primary)] focus:outline-none"
+                />
+                <p className="mt-2 text-xs text-[var(--text-secondary)] font-mono">done / review 阶段的 routing 与通知会显式指向 review_owner。</p>
               </div>
               
               <div className="flex justify-end space-x-3 pt-2">
@@ -560,7 +609,9 @@ const Tickets = () => {
                     setShowCreate(false);
                     setCreateTitle('');
                     setCreateDesc('');
-                    setCreateAgent('donky');
+                    setCreateAgent(stockAdminMode ? 'cowder' : 'donky');
+                    setCreateTriageOwner(stockAdminMode ? 'cowder' : 'leoss');
+                    setCreateReviewOwner(stockAdminMode ? 'cowder' : 'leoss');
                     setCreateError(null);
                   }}
                   className="px-4 py-2 bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded-lg hover:text-[var(--text-primary)] transition-colors"
@@ -600,8 +651,8 @@ const Tickets = () => {
           <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs text-[var(--text-secondary)] font-mono mb-1">OPEN</p>
-                <p className="text-2xl font-bold text-blue-400">{stats.open}</p>
+                <p className="text-xs text-[var(--text-secondary)] font-mono mb-1">ACTIVE</p>
+                <p className="text-2xl font-bold text-blue-400">{stats.active}</p>
               </div>
               <AlertCircle className="w-8 h-8 text-blue-400 opacity-50" />
             </div>
@@ -610,8 +661,8 @@ const Tickets = () => {
           <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs text-[var(--text-secondary)] font-mono mb-1">IN_PROGRESS</p>
-                <p className="text-2xl font-bold text-yellow-400">{stats.inProgress}</p>
+                <p className="text-xs text-[var(--text-secondary)] font-mono mb-1">WAITING_REVIEW</p>
+                <p className="text-2xl font-bold text-yellow-400">{stats.waitingReview}</p>
               </div>
               <Clock className="w-8 h-8 text-yellow-400 opacity-50" />
             </div>
@@ -620,10 +671,10 @@ const Tickets = () => {
           <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs text-[var(--text-secondary)] font-mono mb-1">ACTIVE_BOTS</p>
-                <p className="text-2xl font-bold text-[var(--success)]">{stats.activeBots}/{bots.length}</p>
+                <p className="text-xs text-[var(--text-secondary)] font-mono mb-1">CLOSED</p>
+                <p className="text-2xl font-bold text-[var(--success)]">{stats.closed}</p>
               </div>
-              <Activity className="w-8 h-8 text-[var(--success)] opacity-50" />
+              <CheckCircle2 className="w-8 h-8 text-[var(--success)] opacity-50" />
             </div>
           </div>
         </div>
@@ -659,7 +710,13 @@ const Tickets = () => {
             </div>
             <button
               type="button"
-              onClick={() => setShowCreate(true)}
+              onClick={() => {
+                setCreateAgent(stockAdminMode ? 'cowder' : 'donky');
+                setCreateTriageOwner(stockAdminMode ? 'cowder' : 'leoss');
+                setCreateReviewOwner(stockAdminMode ? 'cowder' : 'leoss');
+                setCreateError(null);
+                setShowCreate(true);
+              }}
               className="flex items-center space-x-2 px-4 py-2 bg-[var(--accent-primary)] text-[var(--bg-primary)] font-bold rounded-lg hover:bg-[var(--accent-primary)]/80 transition-all duration-200 whitespace-nowrap"
             >
               <Plus className="w-4 h-4" />
@@ -669,6 +726,38 @@ const Tickets = () => {
         </div>
 
         <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-4 space-y-4">
+          <div className="flex flex-col gap-3 rounded-lg border border-violet-500/30 bg-violet-500/10 p-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-1">
+              <p className="text-xs font-mono uppercase tracking-wider text-violet-200">Control UI · Stock Admin</p>
+              <p className="text-sm text-violet-50">仅对持有 cowder 受控 stock admin token 的操作者开放 stock-platform 建单与盘面读取，不放开全局超管能力。</p>
+            </div>
+            <div className="flex flex-col gap-3 lg:min-w-[420px]">
+              <label className="inline-flex items-center gap-3 text-sm text-violet-50">
+                <input
+                  type="checkbox"
+                  aria-label="启用受控 stock admin 模式"
+                  checked={stockAdminMode}
+                  onChange={(e) => setStockAdminMode(e.target.checked)}
+                  className="h-4 w-4 rounded border-violet-300 bg-[var(--bg-tertiary)] text-violet-400 focus:ring-violet-400"
+                />
+                <span>启用受控 stock admin 模式</span>
+              </label>
+              <label htmlFor="stock-admin-token" className="space-y-1 text-sm text-violet-50">
+                <span className="block">Stock admin token</span>
+                <input
+                  id="stock-admin-token"
+                  type="password"
+                  aria-label="Stock admin token"
+                  value={stockAdminToken}
+                  onChange={(e) => setStockAdminToken(e.target.value)}
+                  placeholder="仅输入 cowder 的 stock admin token"
+                  disabled={!stockAdminMode}
+                  className="w-full rounded-lg border border-violet-500/40 bg-[var(--bg-tertiary)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-secondary)] focus:border-violet-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                />
+              </label>
+            </div>
+          </div>
+
           <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
             <div className="space-y-2">
               <p className="text-xs font-mono text-[var(--text-secondary)] uppercase tracking-wider">Quick Views</p>
@@ -696,6 +785,8 @@ const Tickets = () => {
 
             <div className="flex items-center gap-3 text-xs font-mono text-[var(--text-secondary)]">
               <span>Visible {visibleTickets.length}/{tickets.length}</span>
+              <span>handoff→review {stats.handoffToReviewer || 0}</span>
+              <span>待决策 {stats.pendingDecision || 0}</span>
               {hasActiveFilters && (
                 <button
                   type="button"
@@ -756,8 +847,26 @@ const Tickets = () => {
           </div>
         </div>
 
-        {/* Tickets Table */}
-        <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg overflow-hidden">
+        <div className="space-y-4">
+          <div className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-secondary)] p-4">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-xs font-mono uppercase tracking-wider text-[var(--text-secondary)]">Bot Status</p>
+                <h2 className="mt-1 text-lg font-bold text-[var(--text-primary)]">Bot 运行状态已拆到独立页</h2>
+                <p className="mt-2 text-sm text-[var(--text-secondary)]">Tickets 主列表只保留工单主流程；Bot 详情、队列和资源占用请到独立 Bot Status 页面查看。当前页首屏不再请求 Bot 状态副路。</p>
+              </div>
+              <Link
+                to="/bot-status"
+                className="inline-flex items-center gap-2 self-start rounded-lg border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+              >
+                <Activity className="w-4 h-4 text-[var(--accent-primary)]" />
+                <span>打开 Bot Status</span>
+                <ExternalLink className="w-4 h-4" />
+              </Link>
+            </div>
+          </div>
+
+          <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg overflow-hidden">
           {tickets.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 px-6">
               <Inbox className="w-16 h-16 text-[var(--text-secondary)] opacity-50 mb-4" />
@@ -842,8 +951,10 @@ const Tickets = () => {
                 </thead>
                 <tbody className="divide-y divide-[var(--border-color)]">
                   {visibleTickets.map((ticket) => {
-                    const bot = bots.find((b) => b.name === ticket.bot);
+                    const agentMeta = getAgentMeta(ticket.assigned_agent || ticket.bot);
                     const isSelected = selectedTickets.includes(ticket.id);
+                    const orchestration = visibleTicketOrchestrations[ticket.id] || buildTicketStageOrchestration(ticket);
+                    const gateStatus = buildTicketStageGateStatus(ticket, { orchestration });
                     return (
                       <tr key={ticket.id} className={`hover:bg-[var(--bg-tertiary)] transition-colors group ${isSelected ? 'bg-[var(--accent-primary)]/5' : ''}`}>
                         <td className="px-6 py-4 whitespace-nowrap">
@@ -870,10 +981,19 @@ const Tickets = () => {
                             <span>{getPriorityIcon(ticket.priority)}</span>
                             <span>{ticket.title}</span>
                           </Link>
+                          <div className="mt-2 space-y-1 text-xs text-[var(--text-secondary)]">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span>阶段编排：{orchestration.headline}</span>
+                              <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${gateStatus.state === 'ready' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : gateStatus.state === 'at_risk' ? 'border-amber-500/40 bg-amber-500/10 text-amber-300' : gateStatus.state === 'gap' ? 'border-rose-500/40 bg-rose-500/10 text-rose-300' : 'border-white/15 bg-white/5 text-[var(--text-secondary)]'}`}>{gateStatus.label}</span>
+                            </div>
+                            <div>门禁：{gateStatus.summary}</div>
+                            <div>下一步：{orchestration.next_action_label || '待定'} → {orchestration.next_stage_label || '待定'}</div>
+                            <div>交接：{orchestration.handoff_summary}</div>
+                          </div>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <span className={`px-3 py-1 text-xs font-bold rounded border ${getStatusColor(ticket.status)}`}>
-                            {ticket.status.toUpperCase().replace('-', '_')}
+                          <span className={`px-3 py-1 text-xs font-bold rounded border ${getStatusColor(ticket)}`}>
+                            {ticket.status_meta?.label || getStatusLabel(ticket.status) || ticket.status.toUpperCase().replace('-', '_')}
                           </span>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
@@ -887,18 +1007,20 @@ const Tickets = () => {
                           </span>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          {bot ? (
-                            <button
-                              type="button"
-                              onClick={() => setSelectedBot(selectedBot === bot.name ? null : bot.name)}
-                              className="flex items-center space-x-2 hover:opacity-80 transition-opacity"
-                            >
-                              <span className="text-lg">{bot.emoji}</span>
+                          {agentMeta ? (
+                            <div className="flex items-center space-x-2">
+                              <span className="text-lg">{agentMeta.emoji}</span>
                               <div>
-                                <p className="text-sm font-medium text-[var(--text-primary)]">{bot.displayName}</p>
-                                <p className="text-xs text-[var(--text-secondary)] font-mono">{ticket.assigned_agent}</p>
+                                <p className="text-sm font-medium text-[var(--text-primary)]">{agentMeta.displayName}</p>
+                                <div className="flex items-center gap-2 text-xs font-mono text-[var(--text-secondary)]">
+                                  <span>{ticket.assigned_agent}</span>
+                                  <Link to="/bot-status" className="inline-flex items-center gap-1 hover:text-[var(--text-primary)]">
+                                    <span>Bot Status</span>
+                                    <ExternalLink className="w-3 h-3" />
+                                  </Link>
+                                </div>
                               </div>
-                            </button>
+                            </div>
                           ) : (
                             <span className="text-sm text-[var(--text-secondary)] font-mono">{renderFieldValue(ticket.assigned_agent)}</span>
                           )}
@@ -917,7 +1039,7 @@ const Tickets = () => {
                           {formatDateTime(ticket.last_update)}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <TicketDependencies ticketId={ticket.id} />
+                          <TicketDependencies summary={ticket.dependency_summary} />
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <div className="flex items-center gap-2">
@@ -948,226 +1070,59 @@ const Tickets = () => {
               </table>
             </div>
           )}
+          </div>
+
+          <aside className="space-y-4">
+            <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-mono uppercase tracking-wider text-[var(--text-secondary)]">Reviewer Inbox</p>
+                  <h2 className="mt-2 text-lg font-bold text-[var(--text-primary)]">review inbox / decision split</h2>
+                  <p className="mt-2 text-sm text-[var(--text-secondary)]">把待验收、审核中、待老大拍板的工单单独拎出来，reviewer 不用在全量列表里捞票。</p>
+                </div>
+                <span className="inline-flex rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2.5 py-1 text-xs font-medium text-cyan-200">
+                  {reviewerInboxTickets.length} 张
+                </span>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                {reviewerInboxTickets.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-[var(--border-color)] bg-[var(--bg-tertiary)] px-4 py-6 text-sm text-[var(--text-secondary)]">
+                    当前没有 reviewer 相关工单。
+                  </div>
+                ) : reviewerInboxTickets.slice(0, 6).map((ticket) => {
+                  const lane = getReviewerLaneMeta(ticket);
+                  return (
+                    <Link
+                      key={ticket.id}
+                      to={`/tickets/${ticket.id}`}
+                      className="block rounded-xl border border-[var(--border-color)] bg-[var(--bg-tertiary)] p-4 transition-colors hover:border-[var(--accent-primary)]"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-[var(--text-primary)]">#{ticket.id} {ticket.title}</div>
+                          <div className="mt-1 text-xs font-mono text-[var(--text-secondary)]">
+                            reviewer {renderFieldValue(ticket.review_owner)} · next {renderFieldValue(ticket.next_actor)}
+                          </div>
+                        </div>
+                        <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${lane.tone}`}>
+                          {lane.label}
+                        </span>
+                      </div>
+                      <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">{lane.hint}</p>
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
+          </aside>
         </div>
 
         {/* Footer */}
         <div className="flex items-center justify-between text-sm text-[var(--text-secondary)] font-mono">
           <span>Showing {visibleTickets.length} of {tickets.length} tickets{hasActiveFilters ? ' · filtered view' : ''}</span>
-          <div className="flex items-center space-x-4">
-            {bots.filter((b) => b.status === 'active').map((bot) => (
-              <div key={bot.name} className="flex items-center space-x-2">
-                <span className="w-2 h-2 rounded-full bg-[var(--success)] animate-pulse-slow" />
-                <span>{bot.emoji} {bot.displayName}</span>
-              </div>
-            ))}
-          </div>
+          <span>首屏仅请求 Tickets 主列表 DTO；详情与依赖明细改为按需加载</span>
         </div>
-      </div>
-
-      {/* Bot Details Sidebar */}
-      <div className="w-96 space-y-4">
-        {selectedBot ? (
-          (() => {
-            const bot = bots.find((b) => b.name === selectedBot);
-            if (!bot) return null;
-            return (
-              <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-5 space-y-4">
-                {/* Header */}
-                <div className="flex items-center justify-between pb-4 border-b border-[var(--border-color)]">
-                  <div className="flex items-center space-x-3">
-                    <span className="text-3xl">{bot.emoji}</span>
-                    <div>
-                      <h2 className="text-xl font-bold text-[var(--text-primary)]">{bot.displayName}</h2>
-                      <p className="text-xs text-[var(--text-secondary)] font-mono">{bot.name}</p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedBot(null)}
-                    className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
-                  >
-                    <XCircle className="w-5 h-5" />
-                  </button>
-                </div>
-
-                {/* Current Task */}
-                {bot.currentTask && (
-                  <div className="space-y-2">
-                    <div className="flex items-center space-x-2 text-sm font-bold text-[var(--accent-primary)]">
-                      <Zap className="w-4 h-4" />
-                      <span>CURRENT_TASK</span>
-                    </div>
-                    <div className="bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded-lg p-3">
-                      <Link
-                        to={`/tickets/${bot.currentTask.id}`}
-                        className="text-sm text-[var(--text-primary)] hover:text-[var(--accent-primary)] transition-colors"
-                      >
-                        #{bot.currentTask.id.toString().padStart(4, '0')} {bot.currentTask.title}
-                      </Link>
-                      <div className="mt-2">
-                        <div className="flex items-center justify-between text-xs text-[var(--text-secondary)] mb-1">
-                          <span>Progress</span>
-                          <span className="font-mono">{bot.currentTask.progress}%</span>
-                        </div>
-                        <div className="w-full bg-[var(--bg-primary)] rounded-full h-2 overflow-hidden border border-[var(--border-color)]">
-                          <div
-                            className="h-2 bg-[var(--accent-primary)] transition-all duration-500"
-                            style={{ width: `${bot.currentTask.progress}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Task Queue */}
-                {bot.queue.length > 0 && (
-                  <div className="space-y-2">
-                    <div className="flex items-center space-x-2 text-sm font-bold text-[var(--text-primary)]">
-                      <List className="w-4 h-4" />
-                      <span>QUEUE ({bot.queue.length})</span>
-                    </div>
-                    <div className="space-y-2">
-                      {bot.queue.map((task, index) => (
-                        <Link
-                          key={task.id}
-                          to={`/tickets/${task.id}`}
-                          className="block bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded p-2 hover:border-[var(--accent-primary)] transition-colors"
-                        >
-                          <div className="flex items-center space-x-2">
-                            <span className="text-xs font-mono text-[var(--text-secondary)]">#{index + 1}</span>
-                            <span className="text-xs text-[var(--text-primary)]">{task.title}</span>
-                          </div>
-                        </Link>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Stats */}
-                <div className="space-y-2">
-                  <div className="text-sm font-bold text-[var(--text-primary)]">TODAY_STATS</div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded p-3">
-                      <p className="text-xs text-[var(--text-secondary)] font-mono mb-1">COMPLETED</p>
-                      <p className="text-xl font-bold text-[var(--success)]">{bot.stats.todayCompleted}</p>
-                    </div>
-                    <div className="bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded p-3">
-                      <p className="text-xs text-[var(--text-secondary)] font-mono mb-1">AVG_TIME</p>
-                      <p className="text-xl font-bold text-[var(--text-primary)]">{bot.stats.avgResponseTime}</p>
-                    </div>
-                    <div className="bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded p-3">
-                      <p className="text-xs text-[var(--text-secondary)] font-mono mb-1">SUCCESS</p>
-                      <p className="text-xl font-bold text-[var(--accent-primary)]">{bot.stats.successRate}%</p>
-                    </div>
-                    <div className="bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded p-3">
-                      <p className="text-xs text-[var(--text-secondary)] font-mono mb-1">UPTIME</p>
-                      <p className="text-xl font-bold text-[var(--text-primary)]">{bot.stats.uptime}</p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Recent Tasks */}
-                <div className="space-y-2">
-                  <div className="text-sm font-bold text-[var(--text-primary)]">RECENT_TASKS</div>
-                  <div className="space-y-2">
-                    {bot.recentTasks.map((task) => (
-                      <div
-                        key={task.id}
-                        className="flex items-center justify-between bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded p-2"
-                      >
-                        <div className="flex items-center space-x-2 flex-1 min-w-0">
-                          <CheckCircle className="w-3 h-3 text-[var(--success)] flex-shrink-0" />
-                          <span className="text-xs text-[var(--text-primary)] truncate">{task.title}</span>
-                        </div>
-                        <span className="text-xs text-[var(--text-secondary)] font-mono ml-2">{task.time}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Token Usage */}
-                <div className="space-y-2">
-                  <div className="text-sm font-bold text-[var(--text-primary)]">TOKEN_USAGE</div>
-                  <div className="bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded p-3">
-                    <div className="flex items-center justify-between text-xs text-[var(--text-secondary)] mb-2">
-                      <span className="font-mono">USAGE</span>
-                      <span className="font-mono">{bot.tokens}</span>
-                    </div>
-                    <div className="w-full bg-[var(--bg-primary)] rounded-full h-2 overflow-hidden border border-[var(--border-color)]">
-                      <div
-                        className={`h-2 transition-all duration-500 ${
-                          bot.usage > 70 ? 'bg-[var(--danger)]' :
-                          bot.usage > 40 ? 'bg-[var(--warning)]' :
-                          'bg-[var(--success)]'
-                        }`}
-                        style={{ width: `${bot.usage}%` }}
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          })()
-        ) : (
-          /* Bot List View */
-          <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-5">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-bold text-[var(--text-primary)] flex items-center space-x-2">
-                <Activity className="w-5 h-5 text-[var(--accent-primary)]" />
-                <span>BOT_STATUS</span>
-              </h2>
-              <div className="flex items-center space-x-2">
-                <span className="w-2 h-2 rounded-full bg-[var(--success)] animate-pulse-slow" />
-                <span className="text-xs text-[var(--text-secondary)] font-mono">LIVE</span>
-              </div>
-            </div>
-
-            <div className="space-y-3">
-              {bots.map((bot) => (
-                <button
-                  key={bot.name}
-                  type="button"
-                  onClick={() => setSelectedBot(bot.name)}
-                  className="w-full bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded-lg p-4 hover:border-[var(--accent-primary)] transition-all duration-200 text-left"
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center space-x-3">
-                      <span className="text-2xl">{bot.emoji}</span>
-                      <div>
-                        <div className="font-bold text-[var(--text-primary)]">{bot.displayName}</div>
-                        <div className="text-xs text-[var(--text-secondary)] font-mono">{bot.name}</div>
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      <span className={`w-2 h-2 rounded-full ${bot.status === 'active' ? 'bg-[var(--success)]' : 'bg-[var(--text-secondary)]'}`} />
-                      <span className="text-xs font-bold text-[var(--text-secondary)]">
-                        {bot.status === 'active' ? 'ACTIVE' : 'IDLE'}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 text-xs">
-                    <div className="flex items-center justify-between text-[var(--text-secondary)]">
-                      <span className="font-mono">TODAY</span>
-                      <span className="text-[var(--success)] font-bold">{bot.stats.todayCompleted} 已完成</span>
-                    </div>
-                    <div className="flex items-center justify-between text-[var(--text-secondary)]">
-                      <span className="font-mono">TOKENS</span>
-                      <span className="text-[var(--text-primary)] font-mono">{bot.tokens}</span>
-                    </div>
-                    {bot.currentTask && (
-                      <div className="pt-2 border-t border-[var(--border-color)]">
-                        <p className="text-[var(--accent-primary)] font-bold mb-1">WORKING ON:</p>
-                        <p className="text-[var(--text-primary)] truncate">{bot.currentTask.title}</p>
-                      </div>
-                    )}
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </div>
     </>

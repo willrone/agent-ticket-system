@@ -4,8 +4,40 @@ export function fetchTickets() {
   return apiRequest('/api/tickets');
 }
 
+export function fetchInbox() {
+  return apiRequest('/api/inbox');
+}
+
+export function fetchTriageInbox() {
+  return apiRequest('/api/inbox/triage');
+}
+
+export function fetchExecutionInbox() {
+  return apiRequest('/api/inbox/execution');
+}
+
+export function fetchReviewInbox() {
+  return apiRequest('/api/inbox/review');
+}
+
+export function fetchDecisionInbox() {
+  return apiRequest('/api/inbox/decisions');
+}
+
 export function fetchBots() {
   return apiRequest('/api/bots');
+}
+
+export function fetchAgentTopology() {
+  return apiRequest('/api/agent-topology');
+}
+
+export function fetchPlaybookStage(stage, params = {}) {
+  const search = new URLSearchParams();
+  if (params.mode) search.set('mode', params.mode);
+  if (params.role) search.set('role', params.role);
+  const suffix = search.toString() ? `?${search.toString()}` : '';
+  return apiRequest(`/api/playbooks/${encodeURIComponent(stage)}${suffix}`);
 }
 
 export function fetchTicketDetail(ticketId) {
@@ -39,16 +71,52 @@ export function fetchTicketComments(ticketId, filters = {}) {
 }
 
 /**
- * 创建工单（Pull 模式：立即返回，status 为 queued）
+ * 创建工单（立即返回新 ticket；create 路径默认进入 triage）
  * @param {Object} params
  * @param {string} params.title - 工单标题
  * @param {string} [params.description] - 工单描述
- * @param {string} [params.agent='donky'] - 派发给的 agent
+ * @param {string} [params.agent] - 兼容旧字段，预指派执行人
+ * @param {string} [params.assigned_agent] - canonical 预指派执行人
  */
-export function createTicket({ title, description, agent, status, triage_owner, next_actor }) {
+export function createTicket({ title, description, agent, assigned_agent, status, triage_owner, review_owner, next_actor, platform }) {
   return apiRequest('/api/tickets', {
     method: 'POST',
-    body: { title, description, agent, status, triage_owner, next_actor },
+    body: {
+      title,
+      description,
+      agent,
+      assigned_agent,
+      status,
+      triage_owner,
+      review_owner,
+      next_actor,
+      platform,
+    },
+  });
+}
+
+export function fetchStockAdminTickets(agentAdminToken) {
+  return apiRequest('/api/v1/admin/stock-tickets', {
+    headers: {
+      Authorization: `Bearer ${agentAdminToken}`,
+    },
+  });
+}
+
+export function createStockAdminTicket(agentAdminToken, { title, description, assigned_agent, triage_owner, review_owner }) {
+  return apiRequest('/api/v1/admin/stock-tickets', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${agentAdminToken}`,
+    },
+    body: {
+      title,
+      description,
+      assigned_agent,
+      triage_owner,
+      review_owner,
+      platform: 'stock-platform',
+    },
   });
 }
 
@@ -59,6 +127,12 @@ export function dispatchTicket(ticketId, agent = 'donky') {
   return apiRequest(`/api/tickets/${ticketId}/dispatch`, {
     method: 'POST',
     body: { agent },
+  });
+}
+
+export function nudgeTicket(ticketId) {
+  return apiRequest(`/api/tickets/${ticketId}/nudge`, {
+    method: 'POST',
   });
 }
 

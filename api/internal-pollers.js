@@ -1,10 +1,13 @@
-import { spawn } from 'child_process';
-import { getDispatchSessionKeyForTicket, getAuditSessionKeyForTicket, getNotificationSessionKey, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
+import { getAuditSessionKeyForTicket, NOTIFY_MAIN_SESSION } from './agent-session-router.js';
+import * as store from './store.js';
+import * as dispatchEvents from './dispatch.js';
+import { deliverChatToGateway } from './delivery-transport.js';
+import { executionModeRequiresWorker, hasExecutionWorkerEvidence } from '../execution-policy.js';
 
 const DEFAULT_API_BASE_URL = process.env.TICKET_API_BASE_URL || 'http://127.0.0.1:8788';
 const DEFAULT_DISPATCH_INTERVAL_MS = parsePositiveInt(process.env.TICKET_DISPATCH_POLL_INTERVAL_MS, 5 * 1000);
 const DEFAULT_NOTIFY_INTERVAL_MS = parsePositiveInt(process.env.TICKET_NOTIFY_POLL_INTERVAL_MS, 5 * 1000);
-const DEFAULT_AUDIT_INTERVAL_MS = parsePositiveInt(process.env.TICKET_AUDIT_POLL_INTERVAL_MS, 0); // 已禁用
+const DEFAULT_AUDIT_INTERVAL_MS = parsePositiveInt(process.env.TICKET_AUDIT_POLL_INTERVAL_MS, 30 * 1000);
 const DEFAULT_DELIVERY_TIMEOUT_MS = parsePositiveInt(process.env.TICKET_DELIVERY_TIMEOUT_MS, 30 * 1000);
 
 function parsePositiveInt(value, fallback) {
@@ -23,49 +26,6 @@ function parseEnabled(value, fallback = true) {
 
 function makeIdempotencyKey(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-/**
- * 调用 OpenClaw chat.send 投递到指定 session。
- * 仅当进程 exit code 为 0 时 resolve；timeout/error/非 0 均 reject，调用方不得 ack。
- */
-function sendChatToSession({ sessionKey, message, idempotencyKey }) {
-  const params = {
-    sessionKey,
-    message,
-    idempotencyKey,
-  };
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      'openclaw',
-      ['gateway', 'call', 'chat.send', '--json', '--params', JSON.stringify(params)],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
-    );
-
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += String(chunk);
-    });
-
-    child.on('error', (err) => reject(err));
-    child.on('close', (code) => {
-      if (code !== 0) {
-        return reject(new Error(`chat.send failed (code=${code}): ${stderr || stdout}`));
-      }
-      try {
-        const parsed = JSON.parse(stdout || '{}');
-        return resolve(parsed);
-      } catch {
-        return resolve({ raw: stdout.trim() });
-      }
-    });
-  });
 }
 
 function withTimeout(promise, ms, label) {
@@ -92,9 +52,13 @@ async function fetchReady(apiBaseUrl, path) {
 async function ackDispatch(apiBaseUrl, dispatchId) {
   const url = `${apiBaseUrl}/api/dispatch/${dispatchId}/ack`;
   const res = await fetch(url, { method: 'POST', headers: { accept: 'application/json' } });
+  if (res.status === 404) {
+    return { ok: false, missing: true, status: 404 };
+  }
   if (!res.ok) {
     throw new Error(`ack dispatch ${dispatchId} failed: ${res.status}`);
   }
+  return { ok: true, missing: false, status: res.status };
 }
 
 async function ackNotification(apiBaseUrl, eventId) {
@@ -111,6 +75,13 @@ async function ackAudit(apiBaseUrl, auditId) {
   if (!res.ok) {
     throw new Error(`ack audit ${auditId} failed: ${res.status}`);
   }
+}
+
+export function autoLockDeliveredQueuedTicket({ ticketId, actor, dispatchId }) {
+  void ticketId;
+  void actor;
+  void dispatchId;
+  return { changed: false, reason: 'receipt_driven_dispatch' };
 }
 
 function createWorker({ name, intervalMs, tick }) {
@@ -166,20 +137,104 @@ export function startInternalPollers(options = {}) {
       if (ready.length === 0) return;
 
       for (const item of ready) {
-        const { dispatch_id, ticket_id, agent, message } = item;
+        const {
+          dispatch_id,
+          ticket_id,
+          message,
+          target_gateway_id,
+          transport,
+          target_session_key,
+          reset_session,
+          session_reset_reason,
+          kind,
+          dedupe_key,
+          reason,
+          nudge_source,
+        } = item;
         if (!dispatch_id || !message) continue;
-        const sessionKey = getDispatchSessionKeyForTicket(agent, ticket_id);
         const idempotencyKey = makeIdempotencyKey(`dispatch-${dispatch_id}`);
         try {
-          await withTimeout(
-            sendChatToSession({ sessionKey, message, idempotencyKey }),
+          const result = await withTimeout(
+            deliverChatToGateway({
+              targetGatewayId: target_gateway_id,
+              transport,
+              targetSessionKey: target_session_key,
+              message,
+              idempotencyKey,
+              resetSession: reset_session === true,
+              resetReason: session_reset_reason || 'assignment_refresh',
+            }),
             deliveryTimeoutMs,
             'dispatch chat.send',
           );
-          await ackDispatch(apiBaseUrl, dispatch_id);
-          console.log(`[internal-poller:dispatch] delivered and acked dispatch_id=${dispatch_id} -> ${sessionKey}`);
+          dispatchEvents.recordDeliveryAttempt({
+            eventKind: 'dispatch',
+            eventId: dispatch_id,
+            ticketId: ticket_id,
+            targetGatewayId: target_gateway_id,
+            transport,
+            targetSessionKey: target_session_key,
+            ok: true,
+            result,
+          });
+          store.markAssignmentDeliveredByDispatchEvent(dispatch_id, {
+            assignment_status: 'delivered',
+            target_session_key: target_session_key,
+            transport,
+          });
+          if (kind === 'nudge') {
+            dispatchEvents.resolvePendingForward('dispatch_nudge', dispatch_id, { channel: 'telegram', resolution: 'delivered' });
+            const unresolved = dispatchEvents.listPendingForwards({ channel: 'telegram', unresolvedOnly: true, ticketId: ticket_id, limit: 50 });
+            for (const row of unresolved) {
+              if (row.event_kind !== 'dispatch_nudge') continue;
+              const sameSession = (row.target_session_key || null) === (target_session_key || null);
+              const sameDedupe = dedupe_key && (row.dedupe_key || null) === dedupe_key;
+              if (!sameSession && !sameDedupe) continue;
+              dispatchEvents.resolvePendingForward('dispatch_nudge', row.event_id, { channel: 'telegram', resolution: 'delivered' });
+            }
+          }
+          const ackResult = await ackDispatch(apiBaseUrl, dispatch_id);
+          if (ackResult?.missing) {
+            console.warn(`[internal-poller:dispatch] dispatch_id=${dispatch_id} vanished before ack after successful delivery; treated as stale-cleared`);
+          } else {
+            console.log(`[internal-poller:dispatch] delivered and acked dispatch_id=${dispatch_id} -> ${target_session_key} @ ${target_gateway_id}; waiting for dispatch_receipt before workflow transition`);
+          }
         } catch (err) {
-          console.error(`[internal-poller:dispatch] delivery failed for dispatch_id=${dispatch_id}, no ack:`, err?.message || err);
+          const errorMessage = err?.message || String(err);
+          dispatchEvents.recordDeliveryAttempt({
+            eventKind: 'dispatch',
+            eventId: dispatch_id,
+            ticketId: ticket_id,
+            targetGatewayId: target_gateway_id,
+            transport,
+            targetSessionKey: target_session_key,
+            ok: false,
+            error: errorMessage,
+          });
+          if (kind === 'nudge') {
+            dispatchEvents.upsertPendingForward({
+              eventKind: 'dispatch_nudge',
+              eventId: dispatch_id,
+              ticketId: ticket_id,
+              channel: 'telegram',
+              targetGatewayId: target_gateway_id,
+              transport,
+              targetSessionKey: target_session_key,
+              dedupeKey: dedupe_key || null,
+              lastError: errorMessage,
+              metadata: {
+                reason: reason || null,
+                nudge_source: nudge_source || null,
+              },
+            });
+          }
+          const retryState = dispatchEvents.markDispatchDeliveryFailed(dispatch_id);
+          store.markAssignmentDeliveryFailedByDispatchEvent(dispatch_id, errorMessage);
+          if (retryState?.next_dispatch_retry_at) {
+            console.log(`[internal-poller:dispatch] delivery degraded for dispatch_id=${dispatch_id}; backoff until ${retryState.next_dispatch_retry_at}: ${errorMessage}`);
+          } else {
+            console.error(`[internal-poller:dispatch] delivery failed for dispatch_id=${dispatch_id}, no ack:`, errorMessage);
+          }
         }
       }
     },
@@ -193,27 +248,60 @@ export function startInternalPollers(options = {}) {
       if (ready.length === 0) return;
 
       for (const item of ready) {
-        const { event_id, message, status, ticket_id, target_session_key, target_actor } = item;
+        const { event_id, message, ticket_id, target_session_key, target_gateway_id, transport, dedupe_key, reason, type } = item;
         if (!event_id || !message) continue;
-        const sessionKey = target_session_key || getNotificationSessionKey({
-          status,
-          reviewOwner: target_actor,
-          ticketId: ticket_id,
-        });
         const idempotencyKey = makeIdempotencyKey(`notify-${event_id}`);
         try {
-          await withTimeout(
-            sendChatToSession({
-              sessionKey,
+          const result = await withTimeout(
+            deliverChatToGateway({
+              targetGatewayId: target_gateway_id,
+              transport,
+              targetSessionKey: target_session_key,
               message,
               idempotencyKey,
             }),
             deliveryTimeoutMs,
             'notify chat.send',
           );
+          dispatchEvents.recordDeliveryAttempt({
+            eventKind: 'notification',
+            eventId: event_id,
+            ticketId: ticket_id,
+            targetGatewayId: target_gateway_id,
+            transport,
+            targetSessionKey: target_session_key,
+            ok: true,
+            result,
+          });
+          dispatchEvents.resolvePendingForward('notification', event_id, { channel: 'telegram', resolution: 'delivered' });
           await ackNotification(apiBaseUrl, event_id);
-          console.log(`[internal-poller:notify] delivered and acked event_id=${event_id} -> ${sessionKey}`);
+          console.log(`[internal-poller:notify] delivered and acked event_id=${event_id} -> ${target_session_key} @ ${target_gateway_id}`);
         } catch (err) {
+          dispatchEvents.recordDeliveryAttempt({
+            eventKind: 'notification',
+            eventId: event_id,
+            ticketId: ticket_id,
+            targetGatewayId: target_gateway_id,
+            transport,
+            targetSessionKey: target_session_key,
+            ok: false,
+            error: err?.message || String(err),
+          });
+          dispatchEvents.upsertPendingForward({
+            eventKind: 'notification',
+            eventId: event_id,
+            ticketId: ticket_id,
+            channel: 'telegram',
+            targetGatewayId: target_gateway_id,
+            transport,
+            targetSessionKey: target_session_key,
+            dedupeKey: dedupe_key || null,
+            lastError: err?.message || String(err),
+            metadata: {
+              reason: reason || null,
+              type: type || null,
+            },
+          });
           console.error(`[internal-poller:notify] delivery failed for event_id=${event_id}, no ack:`, err?.message || err);
         }
       }
@@ -230,17 +318,43 @@ export function startInternalPollers(options = {}) {
       for (const item of ready) {
         const { audit_id, ticket_id, message } = item;
         if (!audit_id || !message) continue;
-        const sessionKey = getAuditSessionKeyForTicket(ticket_id);
+        const targetSessionKey = getAuditSessionKeyForTicket(ticket_id);
         const idempotencyKey = makeIdempotencyKey(`audit-${audit_id}`);
         try {
-          await withTimeout(
-            sendChatToSession({ sessionKey, message, idempotencyKey }),
+          const result = await withTimeout(
+            deliverChatToGateway({
+              targetGatewayId: 'mac-main',
+              transport: 'local_cli',
+              targetSessionKey,
+              message,
+              idempotencyKey,
+            }),
             deliveryTimeoutMs,
             'audit chat.send',
           );
+          dispatchEvents.recordDeliveryAttempt({
+            eventKind: 'audit',
+            eventId: audit_id,
+            ticketId: ticket_id,
+            targetGatewayId: 'mac-main',
+            transport: 'local_cli',
+            targetSessionKey,
+            ok: true,
+            result,
+          });
           await ackAudit(apiBaseUrl, audit_id);
-          console.log(`[internal-poller:audit] delivered and acked audit_id=${audit_id} -> ${sessionKey}`);
+          console.log(`[internal-poller:audit] delivered and acked audit_id=${audit_id} -> ${targetSessionKey}`);
         } catch (err) {
+          dispatchEvents.recordDeliveryAttempt({
+            eventKind: 'audit',
+            eventId: audit_id,
+            ticketId: ticket_id,
+            targetGatewayId: 'mac-main',
+            transport: 'local_cli',
+            targetSessionKey,
+            ok: false,
+            error: err?.message || String(err),
+          });
           console.error(`[internal-poller:audit] delivery failed for audit_id=${audit_id}, no ack:`, err?.message || err);
         }
       }
@@ -249,7 +363,7 @@ export function startInternalPollers(options = {}) {
 
   dispatchWorker.start();
   notifyWorker.start();
-  // auditWorker.start(); // 已禁用：Sheeply 只做被动审计，不再主动轮询
+  auditWorker.start();
 
   console.log('[internal-poller] started (direct-drive)', {
     apiBaseUrl,

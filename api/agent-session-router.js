@@ -1,23 +1,30 @@
 /**
- * Agent -> OpenClaw sessionKey 路由
+ * participant -> OpenClaw sessionKey 路由
  * 平台直驱：
  * - dispatch: 每张工单进入独立 ticket session，避免堆爆 agent 主会话
- * - notify: 仅 pending_decision/complete/failed 发主会话；reviewer 主交接统一走 dispatch
+ * - notify: pending_decision/blocked/complete/failed 发主会话；done/review 回 reviewer ticket session
  */
 
-const AGENT_SESSION_BASES = {
-  beavy: 'agent:beavy',
-  donky: 'agent:donky',
-  cowder: 'agent:cowder',
-  doggy: 'agent:doggy',
-  marely: 'agent:marely',
-  leoss: 'agent:main',
-};
+import { getParticipantById } from './participant-registry.js';
 
-const HUMAN_PRINCIPAL_ALIASES = new Set(['ronghui', '荣晖']);
+const HUMAN_PRINCIPAL_ALIASES = new Set(['ronghui', '荣晖', 'example-human-operator']);
+const NOTIFY_MAIN_HUMAN_ALIASES = new Set(['ronghui', '荣晖']);
+
+const NOTIFICATION_SESSION_POLICY = {
+  done: 'reviewer_ticket',
+  review: 'reviewer_ticket',
+  complete: 'main',
+  failed: 'main',
+  pending_decision: 'main',
+  blocked: 'main',
+};
 
 /** 通知目标：老大/主会话（固定） - 直发 Telegram */
 export const NOTIFY_MAIN_SESSION = 'agent:main:telegram:direct:8290057699';
+
+export function getNotifyMainSessionKey() {
+  return NOTIFY_MAIN_SESSION;
+}
 
 export function isHumanPrincipal(agent) {
   if (!agent || typeof agent !== 'string') return false;
@@ -25,33 +32,40 @@ export function isHumanPrincipal(agent) {
   return HUMAN_PRINCIPAL_ALIASES.has(normalized) || HUMAN_PRINCIPAL_ALIASES.has(String(agent).trim());
 }
 
-function getSessionBaseForAgent(agent) {
+function shouldRouteHumanPrincipalToNotifyMain(agent) {
+  if (!agent || typeof agent !== 'string') return false;
+  const raw = String(agent).trim();
+  const normalized = raw.toLowerCase();
+  return NOTIFY_MAIN_HUMAN_ALIASES.has(normalized) || NOTIFY_MAIN_HUMAN_ALIASES.has(raw);
+}
+
+function getSessionBaseForParticipant(agent) {
   if (!agent || typeof agent !== 'string') return 'agent:main';
   if (isHumanPrincipal(agent)) return 'agent:main';
-  const normalized = String(agent).trim().toLowerCase();
-  return AGENT_SESSION_BASES[normalized] || 'agent:main';
+  const participant = getParticipantById(agent);
+  return participant?.binding?.session_base || participant?.session_base || 'agent:main';
 }
 
 /**
- * 解析 agent 名得到其主会话 sessionKey（主要用于 notify / fallback）
+ * 解析 participant 得到其主会话 sessionKey（主要用于 notify / fallback）
  * @param {string} agent
  * @returns {string}
  */
 export function getSessionKeyForAgent(agent) {
-  if (isHumanPrincipal(agent)) return NOTIFY_MAIN_SESSION;
-  return `${getSessionBaseForAgent(agent)}:main`;
+  if (isHumanPrincipal(agent)) {
+    return shouldRouteHumanPrincipalToNotifyMain(agent)
+      ? NOTIFY_MAIN_SESSION
+      : `${getSessionBaseForParticipant(agent)}:main`;
+  }
+  return `${getSessionBaseForParticipant(agent)}:main`;
 }
 
 /**
  * 为某张工单生成独立 ticket sessionKey。
- * 例如：
- * - beavy + 26 -> agent:beavy:ticket:26
- * - leoss + 26 -> agent:main:ticket:26
- * - 荣晖 + 26 -> agent:main:ticket:26
  */
 export function getDispatchSessionKeyForTicket(agent, ticketId) {
-  if (isHumanPrincipal(agent)) return NOTIFY_MAIN_SESSION;
-  const base = getSessionBaseForAgent(agent);
+  if (isHumanPrincipal(agent) && shouldRouteHumanPrincipalToNotifyMain(agent)) return NOTIFY_MAIN_SESSION;
+  const base = getSessionBaseForParticipant(agent);
   const normalizedTicketId = Number.parseInt(String(ticketId ?? ''), 10);
   if (!Number.isFinite(normalizedTicketId) || normalizedTicketId <= 0) {
     return `${base}:main`;
@@ -59,15 +73,15 @@ export function getDispatchSessionKeyForTicket(agent, ticketId) {
   return `${base}:ticket:${normalizedTicketId}`;
 }
 
-
 /**
  * 通知 sessionKey 路由：
- * - pending_decision/complete/failed：发给主会话（老大）
- * - done/review 若被调用，仍回落到 review_owner ticket session（仅兼容遗留调用；主交接不应再走 notify）
+ * - pending_decision/blocked/complete/failed：发给主会话（老大）
+ * - done/review：回 reviewer ticket session
  */
 export function getNotificationSessionKey({ status, reviewOwner, ticketId }) {
   const normalizedStatus = String(status ?? '').trim().toLowerCase();
-  if (normalizedStatus === 'done' || normalizedStatus === 'review') {
+  const policy = NOTIFICATION_SESSION_POLICY[normalizedStatus] || 'main';
+  if (policy === 'reviewer_ticket') {
     return getDispatchSessionKeyForTicket(reviewOwner, ticketId);
   }
   return NOTIFY_MAIN_SESSION;

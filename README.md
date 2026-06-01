@@ -14,6 +14,18 @@
 - 当该 agent 已有一张 `running` 工单时，第二张票会返回 `409 RUNNING_TICKET_CONFLICT`，并带出占用中的 ticket id、锁定信息和建议动作；
 - `paused / done / pending_decision / blocked / failed / complete` 均不占用 running 名额。
 
+## 多 Agent 平台通用化设计
+
+- `docs/multi-agent-platform-design-v1.md`：把当前工单系统升级为通用多 Agent 协作平台的设计文档，定义默认四角色、Agent/Role/Capability/Workflow Template 等核心对象。
+- Phase 1/2/3 当前为 **shadow mode**：新增 registry 表、routing preview 和 assignment v2 派生字段，不替换现有 dispatch / notify / assignment 推进行为。
+- 当前只读 API：
+  - `GET /api/v1/platform/agents`
+  - `GET /api/v1/platform/capabilities`
+  - `GET /api/v1/platform/role-contracts`
+  - `GET /api/v1/platform/workflow-templates`
+  - `POST /api/v1/platform/routing/preview`
+  - `GET /api/v1/platform/routing/decisions`
+
 ## 开发命令
 
 ```bash
@@ -22,14 +34,61 @@ npm run dev       # 前端开发服务
 npm run dev:api   # 后端 API（默认 8788）
 npm test          # 单元测试
 npm run build     # 前端构建
+npm run lint      # 最小静态检查
+npm run repo:hygiene          # 检查仓库内是否混入生成物
+npm run repo:hygiene:cleanup  # 清理 api/data test/legacy db 与 .rollout
 ```
+
+## 文档分层（review 时按这个顺序读）
+
+- `README.md`：仓库入口、开发/运维启动、轮询器与常用命令。
+- `docs/API.md`：平台总览、human/admin API、dispatch/notify/session cleanup 等跨角色接口。
+- `docs/reference/api.md`：**agent-facing canonical contract**；`/api/v1/agent/*` 的权威参考。
+- `docs/ticket-platform-current-state.md`：**live/runtime 现状真值**；review 时先核 live surface 再对照此文。
+- `docs/ticket-platform-gap-analysis-and-plan.md`：差距、债务与后续规划，不作为当前 live contract。
+- `docs/ticket-platform-doc-maintenance-policy.md`：文档更新与 reviewer gate 规则。
+
+> 简单说：
+> - 想看“现在 live 是什么” → `docs/ticket-platform-current-state.md`
+> - 想看“agent 应该怎么调用” → `docs/reference/api.md`
+> - 想看“平台还有哪些历史/总览接口” → `docs/API.md`
+> - 想看“未来还要补什么” → gap-analysis
 
 ## 存储说明（SQLite only）
 
 当前版本仅使用 **SQLite** 持久化，不再支持 JSON 存储切换。
 
-- DB 路径：`data/tickets.db`
+- live DB 路径：`data/tickets.db`
 - 可通过环境变量覆盖：`TICKETS_DB_PATH`
+- `data/backups/`：仅保留人工确认需要的备份，不应持续混入临时 sidecar
+- `api/data/test-*.db*` / `api/data/legacy-*.db*`：测试/迁移生成物，**不应入仓**
+- `.rollout/`：本地 rollout / 临时执行产物，**不应入仓**
+
+### 仓库卫生规则（generated artifacts）
+
+默认允许长期留在仓库中的只有：
+- 源码、正式文档、脚本、测试代码
+- 当前 live 所依赖的 `data/tickets.db`（以及明确保留的人工备份）
+
+默认不应入仓的生成物：
+- `api/data/test-*.db*`
+- `api/data/legacy-*.db*`
+- `data/agent-ticket-system.db*`（本地误生成/迁移副本）
+- `data/*.db-shm` / `data/*.db-wal`
+- `data/backups/*.db-shm` / `data/backups/*.db-wal`
+- `.rollout/`
+
+提交前建议至少执行一次：
+
+```bash
+npm run repo:hygiene
+```
+
+若只是清理本地生成物：
+
+```bash
+npm run repo:hygiene:cleanup
+```
 
 ## 常驻启动（macOS LaunchAgent）
 
@@ -44,12 +103,43 @@ npm run build     # 前端构建
 - 会自动常驻拉起 `api/server.js`
 - 默认 DB：`data/tickets.db`
 - 日志路径：`logs/api.out.log` / `logs/api.err.log`
+- plist 会显式下发 poller / local base URL / delivery timeout / port / bind host / node bin 等环境变量，便于 live healthcheck 与排障对齐
+- 如需并行拉 v2，可用 `scripts/create-v2-skeleton.sh` 生成同级 `agent-ticket-system-v2` 骨架；详见 `docs/v2-parallel-runbook.md`
 
 卸载：
 
 ```bash
 ./scripts/uninstall-launchagent.sh
 ```
+
+### live 8788 一键健康核验
+
+仓库提供了一个**只读** healthcheck，专门核对 live 8788 contract / hosted bundle / poller / LaunchAgent / 端口接管状态，默认**不会自动重启、kill 进程或清队列**：
+
+```bash
+npm run healthcheck:live-8788
+# 或
+./scripts/healthcheck-live-8788.sh
+```
+
+默认检查项：
+- `/api/version`、`/api/v1/agent/skills/current`、`/api/v1/agent/playbooks/ticket-handler`
+- `/api/v1/agent/runtime/context`、`/api/workflow/schema`
+- `/api/dispatch/ready`、`/api/notifications/ready`
+- LaunchAgent plist 是否存在、`launchctl print` 是否已加载/运行
+- 8788 是否只有一个监听进程、`api/server.js` 是否被旧手工进程重复启动
+- `logs/api.out.log` 是否出现 internal poller 启动痕迹
+- `logs/api.err.log` 最近窗口是否出现明显异常信号
+
+可选环境变量：
+- `TICKET_EXPECTED_SKILL_VERSION` / `TICKET_EXPECTED_SKILL_CHECKSUM`：要求 live hosted bundle 与预期版本/校验和一致，否则直接 FAIL
+- `TICKET_HEALTHCHECK_VALIDATE_FIXTURES=1`：额外执行 `npm run validate:live-contract-fixtures`
+- `TICKET_HEALTHCHECK_REPLAY_FIXTURES=1`：额外执行 `npm run replay:live-contract-fixtures`（更重，适合上线前/后 smoke）
+
+退出码约定：
+- `0` = PASS
+- `1` = WARN（需要人工复核，但未发现明确硬失败）
+- `2` = FAIL（live 未接管 / 旧进程占端口 / checksum 漂移 / 关键接口异常）
 
 ## 内置轮询线程（平台直驱）
 
@@ -134,10 +224,10 @@ curl -X POST http://127.0.0.1:8788/api/admin/ticket-sessions/cleanup \
 
 ### 相关环境变量
 
-- `TICKET_INTERNAL_POLLERS_ENABLED`：是否启用内置轮询（默认 `true`）
-- `TICKET_DISPATCH_POLL_INTERVAL_MS`：dispatch 轮询间隔（默认 `300000`）
-- `TICKET_NOTIFY_POLL_INTERVAL_MS`：notify 轮询间隔（默认 `120000`）
-- `TICKET_AUDIT_POLL_INTERVAL_MS`：audit 轮询间隔（默认 `600000`）
+- `TICKET_INTERNAL_POLLERS_ENABLED`：是否启用内置轮询（代码默认 `true`；LaunchAgent 安装脚本默认显式写入 `true`）
+- `TICKET_DISPATCH_POLL_INTERVAL_MS`：dispatch 轮询间隔（代码默认 `5000`；LaunchAgent 安装脚本默认显式写入 `5000`）
+- `TICKET_NOTIFY_POLL_INTERVAL_MS`：notify 轮询间隔（代码默认 `5000`；LaunchAgent 安装脚本默认显式写入 `5000`）
+- `TICKET_AUDIT_POLL_INTERVAL_MS`：audit 轮询间隔（代码默认 `30000`；LaunchAgent 安装脚本默认显式写入 `30000`）
 - `AUDIT_REQUEST_RETRY_MINUTES`：audit 已投递但迟迟未收到 result 时的重试窗口（默认 `30` 分钟）
 - `QUEUED_NUDGE_STALE_MINUTES`：queued 工单进入平台催办的滞留阈值（默认 `30` 分钟）
 - `TICKET_NUDGE_THROTTLE_MINUTES`：同一 ticket + agent + nudge_key 的催办节流窗口（默认 `60` 分钟）
@@ -191,7 +281,7 @@ curl -X POST http://127.0.0.1:8788/api/admin/ticket-sessions/cleanup \
 
 ### 当前 bundle 关键字段
 - `skill_id=ticket-handler`
-- `version=2026-03-12.bundle.v7`
+- `version=2026-03-12.bundle.v8`
 - `constraints.single_writer=true`
 - `constraints.direct_ticket_write_allowed=false`
 - `allowed_report_types` 与 `/api/v1/agent/workflow/schema` / report interpreter 保持一致
@@ -211,6 +301,7 @@ curl -X POST http://127.0.0.1:8788/api/admin/ticket-sessions/cleanup \
   - `stage=done`：推进 `start_review`（`done -> review`）
   - `stage=review`：不推进新状态，只把这次派单记为 reviewer 已正式接单并停止重派
   - 非 `accepted`：只记录 receipt/comment，不推进状态
+- `triage_structured_report`：当 `triage.verdict=queue`、`triage.is_executable=true`、目标状态为 `queued`，且责任链至少补齐 `triage_owner/assigned_agent/review_owner` 时，平台自动桥接 `triage -> queue`；若缺链则保持 `triage`，并返回 machine-readable reason（默认 `TRIAGE_QUEUE_CHAIN_INCOMPLETE`）
 - `execution_completed` / `review_submission`：`queued` 会自动桥接 `start_work -> submit_for_review`，`running` 直接 `submit_for_review`
 - 但 `execution_mode=subagent/acp` 时，若 `ticket.worker_stats/current_workers/execution_workers` 看不到真实 worker 证据，则不会自动提审
 - `decision_request` / `blocked_report` / `execution_failed`：若 ticket 仍在 `queued`，会先自动 `start_work`，再落到目标状态

@@ -1,0 +1,43 @@
+{
+  "fixture_id": "live-contract-mismatch-verdicts",
+  "fixture_type": "live-acceptance-runtime-contract",
+  "version": "v1",
+  "summary": "固化 repo 与 live hosted contract 不一致时，live acceptance 必须显式返回 live-not-upgraded / contract-mismatch verdict。",
+  "source_refs": [
+    "docs/reference/api.md",
+    "api/app.test.js",
+    "api/app.js",
+    "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-runtime-context.json",
+    "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/agent-skills-current.json"
+  ],
+  "expected": {
+    "allowed_verdicts": [
+      "pass",
+      "partial",
+      "live-not-upgraded",
+      "contract-mismatch",
+      "dependency-not-closed"
+    ],
+    "must_explain_reviewer_action": true,
+    "mismatch_signals": [
+      "version",
+      "checksum",
+      "runtime contract surface",
+      "hosted bundle surface"
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "live_not_upgraded",
+      "verdict": "live-not-upgraded"
+    },
+    {
+      "case_id": "contract_mismatch",
+      "verdict": "contract-mismatch"
+    }
+  ],
+  "historical_wrong_behavior": [
+    "仓库代码已经升级，但 live bundle/runtime 还没 reload；agent 误把 repo 本地结果当作 live 真值。",
+    "reviewer 只能看到“看起来差不多”，没有明确 verdict 指出是 live-not-upgraded 还是 contract-mismatch。"
+  ]
+}

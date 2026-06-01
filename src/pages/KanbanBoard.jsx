@@ -3,38 +3,25 @@ import { useNavigate } from 'react-router-dom';
 import { fetchTickets, transitionTicket } from '../api/tickets';
 import LoadingState from '../components/LoadingState';
 import ErrorState from '../components/ErrorState';
+import { KANBAN_COLUMNS, getStatusLabel, resolveActionActor } from '../../workflow-schema.js';
+import { groupTicketsByStatus, buildTicketViewModel } from '../../ticket-selectors.js';
 
-const STATUS_META = {
-  triage: { label: '待分诊', color: 'bg-[var(--bg-secondary)] border-violet-500' },
-  queued: { label: '待处理', color: 'bg-[var(--bg-secondary)] border-blue-500' },
-  running: { label: '进行中', color: 'bg-[var(--bg-secondary)] border-yellow-500' },
-  done: { label: '待验收', color: 'bg-[var(--bg-secondary)] border-green-500' },
-  review: { label: '审核中', color: 'bg-[var(--bg-secondary)] border-cyan-500' },
-  pending_decision: { label: '待决策', color: 'bg-[var(--bg-secondary)] border-purple-500' },
-  blocked: { label: '阻塞', color: 'bg-[var(--bg-secondary)] border-orange-500' },
-  failed: { label: '失败', color: 'bg-[var(--bg-secondary)] border-red-500' },
-  complete: { label: '已关单', color: 'bg-[var(--bg-secondary)] border-emerald-500' },
-};
-
-const COLUMNS = [
-  'triage',
-  'queued',
-  'running',
-  'done',
-  'review',
-  'pending_decision',
-  'blocked',
-  'failed',
-  'complete',
-].map((id) => ({ id, ...STATUS_META[id] }));
+const COLUMNS = KANBAN_COLUMNS.map((column) => ({ id: column.id, label: column.label, color: column.color }));
 
 const DRAG_TRANSITIONS = {
-  'queued->running': { action: 'start_work', actor: (ticket) => ticket.assigned_agent || ticket.next_actor || 'Current User' },
-  'running->done': { action: 'submit_for_review', actor: (ticket) => ticket.assigned_agent || ticket.next_actor || 'Current User', extra: { result_summary: 'Kanban 拖拽提交验收' } },
-  'done->complete': { action: 'approve', actor: (ticket) => ticket.review_owner || ticket.triage_owner || ticket.next_actor || 'Current User' },
-  'review->complete': { action: 'approve', actor: (ticket) => ticket.review_owner || ticket.triage_owner || ticket.next_actor || 'Current User' },
-  'blocked->queued': { action: 'unblock', actor: (ticket) => ticket.triage_owner || ticket.next_actor || 'Current User' },
-  'pending_decision->queued': { action: 'resume_from_decision', actor: (ticket) => ticket.decision_owner || ticket.review_owner || ticket.triage_owner || ticket.next_actor || 'Current User' },
+  'queued->running': { action: 'start_work' },
+  'running->done': { action: 'submit_for_review', extra: { result_summary: 'Kanban 拖拽提交验收' } },
+  'done->complete': { action: 'approve' },
+  'review->complete': { action: 'approve' },
+  'blocked->queued': { action: 'unblock' },
+  'pending_decision->queued': { action: 'resume_from_decision' },
+  'queued->paused': { action: 'pause', extra: { pause_reason: 'Kanban 拖拽暂时挂起' } },
+  'running->paused': { action: 'pause', extra: { pause_reason: 'Kanban 拖拽暂时挂起' } },
+  'running->queued': { action: 'reset_to_queued', extra: { reason: 'Kanban 拖拽撤销误触开工' } },
+  'paused->queued': { action: 'reset_to_queued', extra: { reason: 'Kanban 拖拽撤销误触开工' } },
+  'paused->running': { action: 'resume' },
+  'paused->done': { action: 'resume' },
+  'paused->review': { action: 'resume' },
 };
 
 function KanbanBoard() {
@@ -54,7 +41,8 @@ function KanbanBoard() {
       setLoading(true);
       setError('');
       const data = await fetchTickets();
-      setTickets(Array.isArray(data) ? data : []);
+      const rawTickets = Array.isArray(data) ? data : (Array.isArray(data?.tickets) ? data.tickets : []);
+      setTickets(rawTickets.map((t) => buildTicketViewModel(t)));
     } catch (err) {
       console.error('Failed to load tickets:', err);
       setError(err?.message || '工单加载失败');
@@ -63,15 +51,10 @@ function KanbanBoard() {
     }
   }
 
-  const ticketsByStatus = useMemo(() => {
-    const groups = Object.fromEntries(COLUMNS.map((column) => [column.id, []]));
-    for (const ticket of tickets) {
-      if (groups[ticket.status]) {
-        groups[ticket.status].push(ticket);
-      }
-    }
-    return groups;
-  }, [tickets]);
+  const ticketsByStatus = useMemo(
+    () => groupTicketsByStatus(tickets),
+    [tickets]
+  );
 
   function handleDragStart(e, ticket) {
     setDraggedTicket(ticket);
@@ -100,7 +83,7 @@ function KanbanBoard() {
     const transitionKey = `${draggedTicket.status}->${targetStatus}`;
     const transition = DRAG_TRANSITIONS[transitionKey];
     if (!transition) {
-      alert(`当前不支持从 ${STATUS_META[draggedTicket.status]?.label || draggedTicket.status} 拖到 ${STATUS_META[targetStatus]?.label || targetStatus}。请去详情页执行需要补充字段的操作。`);
+      alert(`当前不支持从 ${getStatusLabel(draggedTicket.status) || draggedTicket.status} 拖到 ${getStatusLabel(targetStatus) || targetStatus}。请去详情页执行需要补充字段的操作。`);
       setDraggedTicket(null);
       return;
     }
@@ -108,7 +91,7 @@ function KanbanBoard() {
     try {
       const payload = {
         action: transition.action,
-        actor: transition.actor(draggedTicket),
+        actor: resolveActionActor(draggedTicket, transition.action),
         comment: `Kanban 拖拽：${draggedTicket.status} → ${targetStatus}`,
         ...(transition.extra || {}),
       };
@@ -197,7 +180,7 @@ function KanbanBoard() {
                       </div>
                       <div className="flex items-center justify-between">
                         <span>当前责任人</span>
-                        <span>{ticket.next_actor || '无'}</span>
+                        <span>{ticket.current_actor || ticket.next_actor || '无'}</span>
                       </div>
                     </div>
                     <div className="flex items-center justify-between text-xs text-[var(--text-secondary)] mt-3">
@@ -223,7 +206,7 @@ function KanbanBoard() {
       <div className="p-4 bg-[var(--bg-secondary)] rounded-lg border border-[var(--accent-primary)]">
         <h3 className="font-semibold text-[var(--accent-primary)] mb-2">💡 使用提示</h3>
         <ul className="text-sm text-[var(--text-secondary)] space-y-1">
-          <li>• 看板严格按真实状态分列：done=待验收，review=审核中，complete=已关单。</li>
+          <li>• 看板严格按真实状态分列：done=待验收，review=审核中，paused=暂时挂起，complete=已关单。</li>
           <li>• 仅支持无需额外填写字段的拖拽流转；需要补充原因/摘要时请进入详情页操作。</li>
           <li>• 点击卡片查看详情；🔒 表示工单已锁定。</li>
         </ul>

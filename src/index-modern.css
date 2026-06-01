@@ -29,8 +29,10 @@
   --status-queued: #58a6ff;
   --status-running: #7c3aed;
   --status-review: #f778ba;
+  --status-paused: #94a3b8;
   --status-done: #3fb950;
   --status-complete: #238636;
+  --status-deprecated: #a1a1aa;
   --status-blocked: #f85149;
   --status-failed: #da3633;
   --status-pending: #d29922;
@@ -124,6 +126,12 @@ body {
   border: 1px solid rgba(247, 120, 186, 0.3);
 }
 
+.status-paused {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--status-paused);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
 .status-done {
   background: rgba(63, 185, 80, 0.15);
   color: var(--status-done);
@@ -134,6 +142,12 @@ body {
   background: rgba(35, 134, 54, 0.15);
   color: var(--status-complete);
   border: 1px solid rgba(35, 134, 54, 0.3);
+}
+
+.status-deprecated {
+  background: rgba(161, 161, 170, 0.15);
+  color: var(--status-deprecated);
+  border: 1px solid rgba(161, 161, 170, 0.3);
 }
 
 .status-blocked,

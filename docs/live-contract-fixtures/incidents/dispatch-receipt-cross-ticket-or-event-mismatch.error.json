@@ -1,0 +1,55 @@
+{
+  "fixture_id": "dispatch-receipt-cross-ticket-or-event-mismatch",
+  "fixture_type": "dispatch-receipt-validation-error",
+  "version": "v1",
+  "summary": "固化 dispatch_receipt 串票/串 dispatch_event 的强校验，防止错误 receipt 写到别的 ticket 或旧事件上。",
+  "source_refs": [
+    "docs/API.md",
+    "api/assignment-write-validation.js",
+    "api/app.test.js"
+  ],
+  "expected": {
+    "http_status": 400,
+    "machine_readable_required": true,
+    "codes": [
+      "DISPATCH_RECEIPT_DISPATCH_ID_INVALID",
+      "DISPATCH_RECEIPT_TICKET_ID_MISMATCH",
+      "DISPATCH_RECEIPT_STAGE_MISMATCH",
+      "DISPATCH_RECEIPT_AGENT_MISMATCH"
+    ]
+  },
+  "cases": [
+    {
+      "name": "dispatch_event_id_invalid",
+      "input": {
+        "report_type": "dispatch_receipt",
+        "receipt": {
+          "dispatch_id": 999999,
+          "ticket_id": 33,
+          "stage": "running",
+          "agent": "beavy",
+          "decision": "accepted"
+        }
+      },
+      "expected_error_code": "DISPATCH_RECEIPT_DISPATCH_ID_INVALID"
+    },
+    {
+      "name": "ticket_id_mismatch",
+      "input": {
+        "report_type": "dispatch_receipt",
+        "receipt": {
+          "dispatch_id": 329,
+          "ticket_id": 999,
+          "stage": "running",
+          "agent": "beavy",
+          "decision": "accepted"
+        }
+      },
+      "expected_error_code": "DISPATCH_RECEIPT_TICKET_ID_MISMATCH"
+    }
+  ],
+  "historical_wrong_behavior": [
+    "receipt 仅校验 report_type，不校验 dispatch_id/ticket_id/stage/agent 一致性，导致串票。",
+    "错误响应缺 machine_readable/code，后续脚本无法自动识别和回放。"
+  ]
+}

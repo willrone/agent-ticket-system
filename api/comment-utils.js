@@ -22,6 +22,16 @@ export function normalizeCommentShape(comment = {}) {
     notify_targets: Array.isArray(comment.notify_targets)
       ? comment.notify_targets
       : parseJsonArray(comment.notify_targets_json),
+    metadata: comment.metadata && typeof comment.metadata === 'object'
+      ? comment.metadata
+      : (() => {
+          try {
+            const parsed = JSON.parse(comment.metadata_json || '{}');
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+          } catch {
+            return {};
+          }
+        })(),
   };
 }
 

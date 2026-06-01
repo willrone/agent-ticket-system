@@ -1,0 +1,39 @@
+{
+  "fixture_id": "notifications-ready-snapshot",
+  "fixture_type": "notifications-ready-snapshot",
+  "version": "v1",
+  "summary": "冻结 2026-03-15 live baseline 的 notifications ready 空队列断面，并固化 notify-only 阶段与 reviewer 主交接的边界 contract。",
+  "source_refs": [
+    "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/capture-manifest.json",
+    "fixtures/ticket-platform-live/2026-03-15T1115+08-baseline/notifications-ready.json",
+    "api/sheeply-e2e.test.js",
+    "api/app.test.js",
+    "docs/API.md"
+  ],
+  "captured_from": {
+    "batch": "ticket-platform-live/2026-03-15T1115+08-baseline",
+    "endpoint": "/api/notifications/ready",
+    "captured_at": "2026-03-15T11:14:07.445359+08:00"
+  },
+  "expected": {
+    "ready_count": 0,
+    "ready": [],
+    "queue_boundary_contract": {
+      "notify_only_statuses": [
+        "pending_decision",
+        "blocked",
+        "complete",
+        "failed"
+      ],
+      "reviewer_handoff_via_dispatch": true,
+      "reviewer_handoff_via_notifications": false
+    }
+  },
+  "live_snapshot": {
+    "ready": []
+  },
+  "historical_wrong_behavior": [
+    "reviewer 主交接被错误塞进 notifications ready，导致 dispatch/notify 责任边界混乱。",
+    "pending_decision 或 blocked 没有进入 notifications ready，导致 notify-only 阶段丢失投递入口。"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "fixture_id": "dispatch-receipt-invalid-dispatch-id-error",
+  "fixture_type": "dispatch-receipt-validation-error",
+  "version": "v1",
+  "summary": "固化 dispatch_receipt 带无效 dispatch_id 时必须返回 machine-readable 400 错误的 contract。",
+  "source_refs": [
+    "api/app.test.js",
+    "docs/API.md",
+    "api/assignment-write-validation.js"
+  ],
+  "input": {
+    "report_type": "dispatch_receipt",
+    "receipt": {
+      "dispatch_id": 999999,
+      "ticket_id": "<ticket_id>",
+      "stage": "queued",
+      "agent": "beavy",
+      "decision": "accepted"
+    }
+  },
+  "expected": {
+    "http_status": 400,
+    "code": "DISPATCH_RECEIPT_DISPATCH_ID_INVALID",
+    "validation_audit_id_required": true,
+    "machine_readable_required": true,
+    "machine_readable": {
+      "code": "DISPATCH_RECEIPT_DISPATCH_ID_INVALID",
+      "codes_contains": [
+        "DISPATCH_RECEIPT_DISPATCH_ID_INVALID"
+      ],
+      "errors_non_empty": true
+    }
+  },
+  "historical_wrong_behavior": [
+    "dispatch_receipt 串旧 dispatch_event 时只返回松散文本错误，缺少可机器消费的 code / machine_readable。",
+    "错误响应缺 validation_audit_id，导致 reviewer 与回归脚本无法把失败面和 validation 审计记录关联起来。"
+  ]
+}

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
 import Tickets from './Tickets';
 import * as ticketsApi from '../api/tickets';
@@ -41,58 +42,34 @@ const mockTickets = [
   },
 ];
 
-const mockBots = [
-  {
-    name: 'cowder',
-    displayName: '小牛',
-    status: 'active',
-    tokens: '43k/200k',
-    usage: 22,
-    emoji: '🐮',
-    currentTask: { id: 2, title: 'Database connection timeout', progress: 65 },
-    queue: [{ id: 1, title: 'Login page not loading' }],
-    stats: { todayCompleted: 5, avgResponseTime: '2.3min', successRate: 94, uptime: '2d 14h' },
-    recentTasks: [{ id: 12, title: 'Fix authentication bug', status: 'done', time: '10:30' }],
-  },
-  {
-    name: 'beavy',
-    displayName: '小李',
-    status: 'idle',
-    tokens: '88k/200k',
-    usage: 41,
-    emoji: '🦫',
-    currentTask: null,
-    queue: [],
-    stats: { todayCompleted: 3, avgResponseTime: '2.1min', successRate: 98, uptime: '1d 8h' },
-    recentTasks: [],
-  },
-  {
-    name: 'donky',
-    displayName: '小驴',
-    status: 'idle',
-    tokens: '105k/200k',
-    usage: 53,
-    emoji: '🫏',
-    currentTask: null,
-    queue: [],
-    stats: { todayCompleted: 8, avgResponseTime: '1.8min', successRate: 97, uptime: '3d 8h' },
-    recentTasks: [],
-  },
-];
-
 vi.mock('../api/tickets', () => ({
   fetchTickets: vi.fn(),
-  fetchBots: vi.fn(),
-  fetchTicketDependencies: vi.fn(),
+  fetchStockAdminTickets: vi.fn(),
+  fetchTicketStatus: vi.fn(),
+  createTicket: vi.fn(),
+  createStockAdminTicket: vi.fn(),
+  deleteTicket: vi.fn(),
+  deleteTickets: vi.fn(),
 }));
 
 describe('Tickets', () => {
   beforeEach(() => {
     vi.mocked(ticketsApi.fetchTickets).mockResolvedValue(mockTickets);
-    vi.mocked(ticketsApi.fetchBots).mockResolvedValue(mockBots);
-    vi.mocked(ticketsApi.fetchTicketDependencies).mockResolvedValue({
-      dependencies: [],
-      dependents: [],
+    vi.mocked(ticketsApi.fetchTicketStatus).mockResolvedValue({ status: 'queued', assigned_agent: 'beavy' });
+    vi.mocked(ticketsApi.deleteTicket).mockResolvedValue({ success: true });
+    vi.mocked(ticketsApi.deleteTickets).mockResolvedValue({ success: true });
+    vi.mocked(ticketsApi.createTicket).mockResolvedValue({
+      id: 99,
+      title: 'New created ticket',
+      description: 'Need review owner',
+      status: 'triage',
+      triage_owner: 'leoss',
+      review_owner: 'ronghui',
+      assigned_agent: 'beavy',
+      next_actor: 'leoss',
+      next_actor_source: 'triage_owner',
+      created: '2026-03-07T10:00:00.000Z',
+      last_update: '2026-03-07T10:00:00.000Z',
     });
   });
 
@@ -122,7 +99,139 @@ describe('Tickets', () => {
     expect(screen.getByText(/Next Actor/i)).toBeInTheDocument();
     expect(screen.getAllByText('leoss').length).toBeGreaterThanOrEqual(1);
     expect(ticketsApi.fetchTickets).toHaveBeenCalled();
-    expect(ticketsApi.fetchBots).toHaveBeenCalled();
+  });
+
+
+
+  it('renders stage orchestration summary in ticket rows', async () => {
+    vi.mocked(ticketsApi.fetchTickets).mockResolvedValue([
+      {
+        id: 9,
+        title: 'Running orchestration row',
+        status: 'running',
+        priority: 'high',
+        bot: 'beavy',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        assigned_agent: 'beavy',
+        current_actor: 'beavy',
+        next_actor: 'beavy',
+        next_actor_source: 'assigned_agent',
+        platform: 'ticket-platform',
+        request_type: 'feature',
+        execution_mode: 'subagent',
+        dispatch_state: 'receipt_accepted',
+        created: '2026-03-06T09:15:00.000Z',
+        last_update: '2026-03-06T10:15:00.000Z',
+      },
+    ]);
+
+    render(
+      <MemoryRouter>
+        <Tickets />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Running orchestration row/)).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/阶段编排：当前处于进行中，由 beavy 继续实现与验证；完成后应提交到待验收。/)).toBeInTheDocument();
+    expect(screen.getByText(/门禁就绪/)).toBeInTheDocument();
+    expect(screen.getByText(/当前阶段已有责任人和下一步路径，可继续推进。/)).toBeInTheDocument();
+    expect(screen.getByText(/下一步：✅ 提交验收 → 待验收/)).toBeInTheDocument();
+    expect(screen.getByText(/Running orchestration row/)).toBeInTheDocument();
+  });
+
+  it('renders at-risk gate badge for queued subagent rows missing worker evidence', async () => {
+    vi.mocked(ticketsApi.fetchTickets).mockResolvedValue([
+      {
+        id: 10,
+        title: 'Queued subagent without worker evidence',
+        status: 'queued',
+        priority: 'high',
+        bot: 'beavy',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        assigned_agent: 'beavy',
+        current_actor: 'beavy',
+        next_actor: 'beavy',
+        next_actor_source: 'assigned_agent',
+        platform: 'ticket-platform',
+        request_type: 'feature',
+        execution_mode: 'subagent',
+        dispatch_state: 'receipt_accepted',
+        execution_guard: {
+          has_worker_evidence: false,
+        },
+        created: '2026-03-06T09:15:00.000Z',
+        last_update: '2026-03-06T10:15:00.000Z',
+      },
+    ]);
+
+    render(
+      <MemoryRouter>
+        <Tickets />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Queued subagent without worker evidence/)).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/缺 worker 证据/)).toBeInTheDocument();
+    expect(screen.getByText(/subagent queued 已 receipt，但还没有真实 worker evidence/)).toBeInTheDocument();
+  });
+
+  it('renders reviewer inbox sidebar with review vs pending decision split', async () => {
+    vi.mocked(ticketsApi.fetchTickets).mockResolvedValue([
+      ...mockTickets,
+      {
+        id: 3,
+        title: 'Ready for reviewer closeout',
+        status: 'done',
+        priority: 'medium',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        assigned_agent: 'beavy',
+        next_actor: 'leoss',
+        next_actor_source: 'review_owner',
+        result_summary: '交付已经完成，等待 reviewer 收口。',
+        created: '2026-03-06T09:15:00.000Z',
+        last_update: '2026-03-06T10:15:00.000Z',
+      },
+      {
+        id: 4,
+        title: 'Need boss decision',
+        status: 'pending_decision',
+        priority: 'high',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+        decision_owner: '荣晖',
+        assigned_agent: 'beavy',
+        next_actor: '荣晖',
+        next_actor_source: 'decision_owner',
+        decision_summary: '需要确认是否继续开放。',
+        created: '2026-03-06T11:15:00.000Z',
+        last_update: '2026-03-06T12:15:00.000Z',
+      },
+    ]);
+
+    render(
+      <MemoryRouter>
+        <Tickets />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/review inbox \/ decision split/i)).toBeInTheDocument();
+    });
+
+    expect(screen.getAllByText(/Ready for reviewer closeout/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/reviewer 待收口/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Need boss decision/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/待老大决策/)).toBeInTheDocument();
+    expect(screen.getByText(/等待 decision owner 拍板/)).toBeInTheDocument();
   });
 
   it('supports platform / request type / assigned agent filters and quick views', async () => {
@@ -191,9 +300,8 @@ describe('Tickets', () => {
     });
   });
 
-  it('shows error state when fetchBots fails instead of empty data', async () => {
+  it('keeps ticket list usable and advertises bot status as an independent page', async () => {
     vi.mocked(ticketsApi.fetchTickets).mockResolvedValue(mockTickets);
-    vi.mocked(ticketsApi.fetchBots).mockRejectedValue(new Error('无法连接后端服务，请检查 VITE_API_BASE_URL/代理配置以及后端是否已启动。'));
 
     render(
       <MemoryRouter>
@@ -202,15 +310,84 @@ describe('Tickets', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText(/加载失败/)).toBeInTheDocument();
+      expect(screen.getByText(/Login page not loading/)).toBeInTheDocument();
     });
-    expect(screen.getByText(/无法连接后端服务/)).toBeInTheDocument();
+    expect(screen.getByText(/当前页首屏不再请求 Bot 状态副路/)).toBeInTheDocument();
     expect(screen.queryByText(/暂无工单/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Manage and track agent tasks/)).toBeInTheDocument();
+  });
+
+  it('create modal passes explicit triage_owner / assigned_agent / review_owner when creating ticket', async () => {
+    render(
+      <MemoryRouter>
+        <Tickets />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Login page not loading/)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /New/i }));
+    fireEvent.change(screen.getByPlaceholderText('输入工单标题'), { target: { value: 'New created ticket' } });
+    fireEvent.change(screen.getByPlaceholderText('输入工单描述（可选）'), { target: { value: 'Need review owner' } });
+    fireEvent.change(screen.getByRole('combobox', { name: '预指派执行人 *' }), { target: { value: 'beavy' } });
+    fireEvent.change(screen.getByLabelText('分诊负责人'), { target: { value: 'cowder' } });
+    fireEvent.change(screen.getByLabelText('验收负责人'), { target: { value: 'ronghui' } });
+    fireEvent.click(screen.getByRole('button', { name: /创建工单/ }));
+
+    await waitFor(() => {
+      expect(ticketsApi.createTicket).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'New created ticket',
+        description: 'Need review owner',
+        assigned_agent: 'beavy',
+        status: 'triage',
+        triage_owner: 'cowder',
+        review_owner: 'ronghui',
+      }));
+    });
+  });
+
+  it('stock admin mode uses cowder token and stock admin create API', async () => {
+    render(
+      <MemoryRouter>
+        <Tickets />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Login page not loading/)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /启用受控 stock admin 模式/ }));
+    fireEvent.change(screen.getByLabelText('Stock admin token'), { target: { value: 'stock-admin-token' } });
+
+    await waitFor(() => {
+      expect(ticketsApi.fetchStockAdminTickets).toHaveBeenCalledWith('stock-admin-token');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /New/i }));
+    fireEvent.change(screen.getByPlaceholderText('输入工单标题'), { target: { value: 'Stock admin created ticket' } });
+    fireEvent.change(screen.getByPlaceholderText('输入工单描述（可选）'), { target: { value: 'Create via stock admin' } });
+    fireEvent.change(screen.getByRole('combobox', { name: '预指派执行人 *' }), { target: { value: 'marely' } });
+    fireEvent.change(screen.getByLabelText('分诊负责人'), { target: { value: 'cowder' } });
+    fireEvent.change(screen.getByLabelText('验收负责人'), { target: { value: 'leoss' } });
+    fireEvent.click(screen.getByRole('button', { name: /创建工单/ }));
+
+    await waitFor(() => {
+      expect(ticketsApi.createStockAdminTicket).toHaveBeenCalledWith('stock-admin-token', expect.objectContaining({
+        title: 'Stock admin created ticket',
+        description: 'Create via stock admin',
+        assigned_agent: 'marely',
+        triage_owner: 'cowder',
+        review_owner: 'leoss',
+      }));
+    });
+    expect(ticketsApi.createTicket).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Stock admin created ticket' }));
   });
 
   it('shows empty state when no tickets', async () => {
     vi.mocked(ticketsApi.fetchTickets).mockResolvedValue([]);
-    vi.mocked(ticketsApi.fetchBots).mockResolvedValue(mockBots);
 
     render(
       <MemoryRouter>
@@ -265,5 +442,20 @@ describe('Tickets', () => {
     });
     const darkThemeCard = container.querySelector('[class*="--bg-secondary"]');
     expect(darkThemeCard).toBeTruthy();
+  });
+
+  it('does not embed Bot Status sidebar but has a clear link to /bot-status', async () => {
+    render(
+      <MemoryRouter>
+        <Tickets />
+      </MemoryRouter>
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/Login page not loading/)).toBeInTheDocument();
+    });
+    const botStatusLinks = screen.getAllByRole('link', { name: /打开 Bot Status|Bot Status/i });
+    expect(botStatusLinks.length).toBeGreaterThan(0);
+    expect(botStatusLinks[0]).toHaveAttribute('href', '/bot-status');
+    expect(screen.queryByRole('button', { name: /ACTIVE|IDLE/ })).not.toBeInTheDocument();
   });
 });

@@ -12,7 +12,14 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:ready-ack-e2e": "vitest run api/sheeply-e2e.test.js",
-    "migrate": "node scripts/migrate-json-to-sqlite.js"
+    "migrate": "node scripts/migrate-json-to-sqlite.js",
+    "cutover:rehearse:v2": "node scripts/rehearse-v2-cutover.js --json",
+    "ticket-sessions:cleanup": "node scripts/ticket-session-cleanup.js --dry-run",
+    "repo:hygiene": "node scripts/repo-hygiene.js --check",
+    "repo:hygiene:cleanup": "node scripts/repo-hygiene.js --cleanup",
+    "healthcheck:live-8788": "./scripts/healthcheck-live-8788.sh",
+    "validate:live-contract-fixtures": "node scripts/validate-live-contract-fixtures.js",
+    "replay:live-contract-fixtures": "node scripts/replay-live-contract-fixtures.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",

@@ -3,7 +3,9 @@ import Dashboard from './pages/Dashboard';
 import Tickets from './pages/Tickets';
 import TicketDetail from './pages/TicketDetail';
 import KanbanBoard from './pages/KanbanBoard';
-import { LayoutDashboard, Ticket, Terminal, Menu, X } from 'lucide-react';
+import BotStatus from './pages/BotStatus';
+import Inbox from './pages/Inbox';
+import { LayoutDashboard, Ticket, Terminal, Activity, Inbox as InboxIcon, Menu, X } from 'lucide-react';
 import { useState } from 'react';
 
 function Sidebar({ isOpen, setIsOpen }) {
@@ -16,6 +18,8 @@ function Sidebar({ isOpen, setIsOpen }) {
   const navItems = [
     { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
     { path: '/tickets', icon: Ticket, label: 'Tickets' },
+    { path: '/inbox', icon: InboxIcon, label: 'Inbox' },
+    { path: '/bot-status', icon: Activity, label: 'Bot Status' },
     { path: '/kanban', icon: Terminal, label: 'Kanban' },
   ];
 
@@ -124,7 +128,9 @@ function App() {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/tickets" element={<Tickets />} />
+              <Route path="/inbox" element={<Inbox />} />
               <Route path="/tickets/:id" element={<TicketDetail />} />
+              <Route path="/bot-status" element={<BotStatus />} />
               <Route path="/kanban" element={<KanbanBoard />} />
             </Routes>
           </main>
