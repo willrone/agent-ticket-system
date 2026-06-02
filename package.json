@@ -11,6 +11,9 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
+    "mcp:server": "node api/mcp/server.js",
+    "mcp:smoke": "node scripts/smoke-mcp-server.js",
+    "test:mcp": "vitest run api/mcp/*.test.js",
     "test:ready-ack-e2e": "vitest run api/sheeply-e2e.test.js",
     "migrate": "node scripts/migrate-json-to-sqlite.js",
     "cutover:rehearse:v2": "node scripts/rehearse-v2-cutover.js --json",
@@ -22,6 +25,7 @@
     "replay:live-contract-fixtures": "node scripts/replay-live-contract-fixtures.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.6.2",
     "express": "^4.21.0",
     "lucide-react": "^0.577.0",
