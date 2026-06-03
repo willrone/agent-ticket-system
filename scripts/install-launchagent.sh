@@ -8,6 +8,21 @@ LOG_DIR="${TICKET_API_LOG_DIR:-$REPO_DIR/logs}"
 ENV_FILE="${TICKET_ENV_FILE:-$HOME/.config/ticket-platform/live.env}"
 RUN_API_SCRIPT="${TICKET_RUN_API_SCRIPT:-$REPO_DIR/scripts/run-api.sh}"
 mkdir -p "$LOG_DIR" "$(dirname -- "$PLIST_PATH")"
+
+# Harden plist against polluted shell environments such as OPENCLAW_CLI=1.
+if [[ -z "${OPENCLAW_CLI:-}" || "${OPENCLAW_CLI:-}" == "1" || "${OPENCLAW_CLI:-}" == "true" || "${OPENCLAW_CLI:-}" == "false" ]]; then
+  OPENCLAW_CLI="${TICKET_OPENCLAW_CLI:-/opt/homebrew/bin/openclaw}"
+fi
+if [[ -z "${SSH_CLI:-}" || "${SSH_CLI:-}" == "1" || "${SSH_CLI:-}" == "true" || "${SSH_CLI:-}" == "false" ]]; then
+  SSH_CLI="${TICKET_SSH_CLI:-/usr/bin/ssh}"
+fi
+
+if [[ -z "${OPENCLAW_CLI:-}" || "${OPENCLAW_CLI:-}" == "1" || "${OPENCLAW_CLI:-}" == "true" || "${OPENCLAW_CLI:-}" == "false" ]]; then
+  OPENCLAW_CLI="${TICKET_OPENCLAW_CLI:-/opt/homebrew/bin/openclaw}"
+fi
+if [[ -z "${SSH_CLI:-}" || "${SSH_CLI:-}" == "1" || "${SSH_CLI:-}" == "true" || "${SSH_CLI:-}" == "false" ]]; then
+  SSH_CLI="${TICKET_SSH_CLI:-/usr/bin/ssh}"
+fi
 cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
