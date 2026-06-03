@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { buildWorkflowActorContract, getWorkflowSchema, listAvailableActionsForStatus } from '../workflow-schema.js';
 import { getExecutionWorkerEvidence } from '../execution-policy.js';
 import { getAgentTopologyRegistry, getGatewayForAgent } from './agent-topology.js';
-import { resolveDispatchDelivery } from './agent-delivery-router.js';
 import * as dispatch from './dispatch.js';
 import * as store from './store-sqlite.js';
 
@@ -1806,14 +1805,6 @@ export function buildAssignmentContract(assignment = {}, ticket = {}) {
   const execution = buildAssignmentExecutionContract(ticket, assignment);
   const workerEvidence = buildWorkerEvidenceSnapshot(ticket);
   const actorContract = buildWorkflowActorContract(ticket);
-  const resolvedDelivery = resolveDispatchDelivery({
-    agent: assignment.agent_id,
-    ticketId: ticket.id,
-    kind: deliveryState?.intent === 'workflow_mismatch' ? 'workflow_mismatch' : undefined,
-  });
-  const targetSessionKey = assignment.target_session_key || resolvedDelivery?.target_session_key || null;
-  const targetGatewayId = assignment.gateway_id || resolvedDelivery?.target_gateway_id || gateway.id || null;
-  const targetTransport = assignment.transport || resolvedDelivery?.transport || gateway.transport || null;
   const latestAssignment = assignment.agent_id && ticket.id
     ? store.findLatestAssignmentForTicket(ticket.id, assignment.agent_id) || assignment
     : assignment;
@@ -1972,7 +1963,8 @@ export function buildAssignmentContract(assignment = {}, ticket = {}) {
   };
 }
 
-export function buildDependencySnapshot(sourceTicket = {}, relation, targetTicket = {}, dependencyType = 'blocks') {
+export function buildDependencySnapshot(_sourceTicket = {}, relation, targetTicket = {}, dependencyType = 'blocks') {
+  void _sourceTicket;
   const status = targetTicket.status || null;
   const satisfied = ['done', 'complete'].includes(status);
   const blocking = dependencyType === 'blocks' ? !satisfied : false;

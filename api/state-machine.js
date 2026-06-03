@@ -46,18 +46,6 @@ export const TRANSITIONS = Object.fromEntries(
 const RUNNING_ENTRY_ACTIONS = new Set(['start_work', 'resume']);
 const PARENT_CLOSEOUT_TERMINAL_STATUSES = new Set(['complete', 'failed', 'deprecated']);
 
-function hasQueuedReceiptAcceptedReservation(ticket = {}) {
-  const targetActor = String(ticket.next_actor || ticket.assigned_agent || '').trim();
-  if (!targetActor) return false;
-  const latestHandshake = dispatch.getLatestDispatchHandshakeState(ticket.id, targetActor, ticket.status);
-  return Boolean(
-    ticket.status === 'queued'
-    && latestHandshake
-    && latestHandshake.dispatch_state === 'receipt_accepted'
-    && latestHandshake.receipt_decision === 'accepted'
-    && String(latestHandshake.receipt_payload?.stage || '').trim() === 'queued'
-  );
-}
 
 export function findRunningEntryConflict(ticket, context = {}, action = 'start_work') {
   const actor = String(context.actor || '').trim();
@@ -197,7 +185,7 @@ function buildParentCloseoutGuardResult(ticket, action) {
   };
 }
 
-function buildDynamicTransitionTarget(action, ticket, context) {
+function buildDynamicTransitionTarget(action, ticket, _context) {
   switch (action) {
     case 'formal_reassign':
     case 'handoff':

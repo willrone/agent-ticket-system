@@ -1,6 +1,9 @@
 # Agent-Facing API Reference
 
 > Related ticket-platform docs:
+> - [`docs/agent-first-run-guide.md`](../agent-first-run-guide.md)
+> - [`docs/platform-empty-state-onboarding.md`](../platform-empty-state-onboarding.md)
+> - [`docs/examples/empty-platform-first-run-payloads.json`](../examples/empty-platform-first-run-payloads.json)
 > - [`docs/ticket-platform-current-state.md`](../ticket-platform-current-state.md)
 > - [`docs/ticket-platform-gap-analysis-and-plan.md`](../ticket-platform-gap-analysis-and-plan.md)
 > - [`docs/ticket-platform-doc-maintenance-policy.md`](../ticket-platform-doc-maintenance-policy.md)
@@ -259,6 +262,28 @@ participant-based routing skeleton。用于先把“我要找谁”解析成稳�
 - `route_target`
 - `explain.resolution_source`
 
+### Empty-platform role/domain registry bootstrap
+This surface is used before a brand-new platform has a complete participant topology.
+
+Endpoints:
+- `GET /api/v1/platform/describe`
+- `GET /api/v1/registry/roles`
+- `GET /api/v1/registry/domains`
+- `POST /api/v1/registry/domains`
+- `POST /api/v1/registry/agents/register`
+- `POST /api/v1/registry/agents/heartbeat`
+- `POST /api/v1/registry/resolve`
+
+Current contract notes:
+- `POST /api/v1/registry/agents/register` records the agent in the in-memory runtime registry and also upserts a SQLite participant projection.
+- `POST /api/v1/registry/agents/heartbeat` refreshes the in-memory registry entry and projection.
+- `POST /api/v1/registry/resolve` currently selects from the in-memory runtime registry, not from the persisted participant projection.
+- After an API restart, agents should re-register or heartbeat before `/api/v1/registry/resolve` is trusted.
+- `GET /api/v1/agent/participants` may still show a persisted participant even when `/api/v1/registry/resolve` is not runtime-ready.
+- `POST /api/v1/registry/domains` uses `X-Platform-Token: dev-platform-token`; treat it as bootstrap/dev-only.
+
+The smallest copyable payload set is in `docs/examples/empty-platform-first-run-payloads.json`.
+
 ### GET /api/v1/agent/assignments/:assignment_id
 关键字段：
 - `ticket.execution_mode`
@@ -358,6 +383,8 @@ participant-based routing skeleton。用于先把“我要找谁”解析成稳�
 POST /api/v1/agent/assignments/:assignment_id/heartbeat
 ```
 
+Raw HTTP should prefer `X-Assignment-Token`; `assignment_token` in body/query is compatibility only. The stored heartbeat progress comes from the `progress` object.
+
 示例：
 
 ```json
@@ -390,6 +417,12 @@ POST /api/v1/agent/assignments/:assignment_id/reports
 - `artifact_upload`
 - `workflow_warning`
 - `handoff_note`
+
+Payload shape:
+- MCP/OpenClaw `submit_report` input uses `{ report_type, idempotency_key, payload: { ... } }`.
+- Raw HTTP `POST /reports` uses `{ report_type, idempotency_key, ...payloadFields }`; do not add a top-level `payload` wrapper.
+- `dispatch_receipt` should put receipt fields under `receipt` for clarity: `{ "report_type": "dispatch_receipt", "receipt": { "dispatch_id": 1, "ticket_id": 2, "stage": "queued", "agent": "executor01", "decision": "accepted" } }`.
+- The route strips only `assignment_token`, `report_type`, and `idempotency_key`; all other top-level fields become the stored/interpreted payload.
 
 ### 平台桥接规则
 平台会把 report 解释为 workflow/comment/notify：

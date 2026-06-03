@@ -33,7 +33,7 @@ import {
 import { buildDashboardMetrics, getTicketProgress } from '../ticket-selectors.js';
 import { detectWorkflowMismatch } from './workflow-mismatch.js';
 import * as dispatch from './dispatch.js';
-import { TRANSITIONS, transition, getAvailableActions, findRunningEntryConflict } from './state-machine.js';
+import { TRANSITIONS, transition, getAvailableActions } from './state-machine.js';
 import { getAuditSessionKeyForTicket, getNotificationSessionKey } from './agent-session-router.js';
 import { resolveDispatchDelivery, resolveNotificationDelivery } from './agent-delivery-router.js';
 import { getAgentTopologyRegistry } from './agent-topology.js';
@@ -42,7 +42,6 @@ import { previewTicketSessionCleanup, runTicketSessionCleanup } from './ticket-s
 import { broadcastTicketStatusChanged, broadcastTicketComment } from './websocket.js';
 import {
   EXECUTION_MODES,
-  isExecutionWorkerActiveStatus,
   normalizeExecutionMode,
 } from '../execution-policy.js';
 import {
@@ -1137,7 +1136,10 @@ function buildStockWorkboardGroups(items = [], groupBy = 'none') {
       if (a.order !== b.order) return a.order - b.order;
       return String(a.group_label).localeCompare(String(b.group_label), 'zh-Hans-CN');
     })
-    .map(({ order, ...rest }) => rest);
+    .map((group) => {
+      const { order: _order, ...rest } = group;
+      return rest;
+    });
 }
 
 function normalizeMentions(mentions = [], content = '') {

@@ -22,7 +22,8 @@
     "repo:hygiene:cleanup": "node scripts/repo-hygiene.js --cleanup",
     "healthcheck:live-8788": "./scripts/healthcheck-live-8788.sh",
     "validate:live-contract-fixtures": "node scripts/validate-live-contract-fixtures.js",
-    "replay:live-contract-fixtures": "node scripts/replay-live-contract-fixtures.js"
+    "replay:live-contract-fixtures": "node scripts/replay-live-contract-fixtures.js",
+    "release:check": "node scripts/release-check.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

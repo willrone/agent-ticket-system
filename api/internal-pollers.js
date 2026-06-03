@@ -2,7 +2,6 @@ import { getAuditSessionKeyForTicket, NOTIFY_MAIN_SESSION } from './agent-sessio
 import * as store from './store.js';
 import * as dispatchEvents from './dispatch.js';
 import { deliverChatToGateway } from './delivery-transport.js';
-import { executionModeRequiresWorker, hasExecutionWorkerEvidence } from '../execution-policy.js';
 
 const DEFAULT_API_BASE_URL = process.env.TICKET_API_BASE_URL || 'http://127.0.0.1:8788';
 const DEFAULT_DISPATCH_INTERVAL_MS = parsePositiveInt(process.env.TICKET_DISPATCH_POLL_INTERVAL_MS, 5 * 1000);

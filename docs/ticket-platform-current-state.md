@@ -1,6 +1,6 @@
 # Ticket Platform Current State
 
-_Last updated: 2026-03-12_
+_Last updated: 2026-06-02_
 
 ## Purpose
 
@@ -15,6 +15,8 @@ Use it to answer:
 If code changes the platform behavior, this document must be updated in the same change.
 
 ## Related documents
+- New agent first-run guide: [`docs/agent-first-run-guide.md`](./agent-first-run-guide.md)
+- Empty-platform onboarding guide: [`docs/platform-empty-state-onboarding.md`](./platform-empty-state-onboarding.md)
 - Gap analysis + plan: [`docs/ticket-platform-gap-analysis-and-plan.md`](./ticket-platform-gap-analysis-and-plan.md)
 - Documentation maintenance policy: [`docs/ticket-platform-doc-maintenance-policy.md`](./ticket-platform-doc-maintenance-policy.md)
 - Platform API overview: [`docs/API.md`](./API.md)
@@ -199,6 +201,23 @@ Reviewer 不应只看“有没有 ticket_actions 字段”，还要核对 **stat
 - baseline 只覆盖 reviewer / agent-facing 主链路动作：`queue / start_work / pause / resume / approve / reject`
 - parity 测试必须同时对齐 `workflow-schema.js -> listAvailableActionsForStatus()` 与 hosted runtime `ticket_actions`
 - 不把 `request_decision` / `block` / `fail` / `handoff` / `formal_reassign` / `management_only` 动作混进这份 reviewer-facing baseline，避免把“全量 transition 能力”误当成“前端/验收主基线”
+
+### Role/domain registry bootstrap current state
+The platform now exposes a minimal empty-state registry surface:
+- `GET /api/v1/platform/describe`
+- `GET /api/v1/registry/roles`
+- `GET /api/v1/registry/domains`
+- `POST /api/v1/registry/domains`
+- `POST /api/v1/registry/agents/register`
+- `POST /api/v1/registry/agents/heartbeat`
+- `POST /api/v1/registry/resolve`
+
+Current source-of-truth boundary:
+- Agent registration and heartbeat write to a process-local registered-agent map.
+- The same calls upsert a persisted participant projection, so `GET /api/v1/agent/participants` can continue to show registered participants.
+- Runtime route readiness for `POST /api/v1/registry/resolve` still depends on the process-local map. After API restart, agents should re-register or heartbeat before registry resolve is treated as healthy.
+- A persisted participant projection is useful discovery evidence, but it is not equivalent to runtime resolve readiness today.
+- Domain creation still uses `X-Platform-Token: dev-platform-token`; this is bootstrap/dev-only, not a production admin auth contract.
 
 ---
 
@@ -420,6 +439,9 @@ Reviewers should treat any large wave of `api/data/test-*` / `legacy-*` files in
 ### Documentation stratification
 Current document roles are:
 - `README.md` → repo entrypoint / operator & developer quickstart
+- `docs/agent-first-run-guide.md` → first assignment bootstrap / acknowledgement / heartbeat / report / review guide for new agents
+- `docs/platform-empty-state-onboarding.md` → no-agent platform bootstrap checklist and route smoke guide
+- `docs/examples/empty-platform-first-run-payloads.json` → machine-readable registration / heartbeat / resolve / first-report templates
 - `docs/API.md` → platform-level API overview and cross-role routes
 - `docs/reference/api.md` → canonical agent-facing contract
 - `docs/ticket-platform-current-state.md` → live/runtime truth snapshot

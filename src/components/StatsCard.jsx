@@ -1,4 +1,5 @@
-export default function StatsCard({ title, value, trend, icon: Icon, className = '' }) {
+export default function StatsCard({ title, value, trend, icon, className = '' }) {
+  const StatIcon = icon;
   return (
     <div className={`stat-card ${className}`}>
       <div className="flex items-center justify-between">
@@ -21,7 +22,7 @@ export default function StatsCard({ title, value, trend, icon: Icon, className =
         </div>
         
         <div className="stat-card-icon">
-          <Icon className="w-6 h-6 text-[var(--accent-primary)]" />
+          <StatIcon className="w-6 h-6 text-[var(--accent-primary)]" />
         </div>
       </div>
     </div>

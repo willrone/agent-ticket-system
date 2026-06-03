@@ -202,7 +202,7 @@ export function buildTicketOperationalView(ticket = {}, options = {}) {
     workflow_mismatch: workflowMismatch,
     anomaly_flags: {
       workflow_mismatch: Boolean(workflowMismatch),
-      manual_override_residual: Boolean(storedOverrideActor) && !Boolean(ticket.manual_override_active),
+      manual_override_residual: !!storedOverrideActor && !ticket.manual_override_active,
     },
     stale_flags: [],
     parent_ticket_id: ticket.parent_ticket_id ?? null,

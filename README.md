@@ -39,8 +39,11 @@ npm run repo:hygiene          # 检查仓库内是否混入生成物
 npm run repo:hygiene:cleanup  # 清理 api/data test/legacy db 与 .rollout
 ```
 
-## 文档分层（review 时按这个顺序读）
+## 文档分层（review / onboarding 时按这个顺序读）
 
+- `docs/agent-first-run-guide.md`：**新 agent 第一次收到 assignment 的最短操作指南**；先读这个再干活。
+- `docs/platform-empty-state-onboarding.md`：**全新空平台接入第一批 agent 的最小模板**；用于 no-agent 状态下注册 agent / domain / route smoke。
+- `docs/examples/empty-platform-first-run-payloads.json`：空平台注册、heartbeat、route resolve、首个 smoke ticket 与首条 report 的机器可读模板。
 - `README.md`：仓库入口、开发/运维启动、轮询器与常用命令。
 - `docs/API.md`：平台总览、human/admin API、dispatch/notify/session cleanup 等跨角色接口。
 - `docs/reference/api.md`：**agent-facing canonical contract**；`/api/v1/agent/*` 的权威参考。
@@ -49,6 +52,8 @@ npm run repo:hygiene:cleanup  # 清理 api/data test/legacy db 与 .rollout
 - `docs/ticket-platform-doc-maintenance-policy.md`：文档更新与 reviewer gate 规则。
 
 > 简单说：
+> - 新 agent 第一次接单 → `docs/agent-first-run-guide.md`
+> - 空平台第一次注册 agent → `docs/platform-empty-state-onboarding.md`
 > - 想看“现在 live 是什么” → `docs/ticket-platform-current-state.md`
 > - 想看“agent 应该怎么调用” → `docs/reference/api.md`
 > - 想看“平台还有哪些历史/总览接口” → `docs/API.md`

@@ -37,6 +37,9 @@ function makeChild(stdoutPayload = { ok: true }) {
 
 describe('delivery-transport', () => {
   beforeEach(() => {
+    vi.stubEnv('OPENCLAW_CLI', 'openclaw');
+    vi.stubEnv('SSH_CLI', 'ssh');
+    vi.resetModules();
     spawnMock.mockReset();
     spawnMock.mockImplementation(() => makeChild());
   });

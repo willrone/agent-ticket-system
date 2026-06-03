@@ -1,6 +1,7 @@
 /**
  * @vitest-environment node
  */
+import './test-setup.js';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { validateAssignmentWrite } from './assignment-write-validation.js';
 import {
