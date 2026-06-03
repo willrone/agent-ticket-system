@@ -7,8 +7,16 @@
 
 import { getParticipantById } from './participant-registry.js';
 
-const HUMAN_PRINCIPAL_ALIASES = new Set(['ronghui', '荣晖', 'example-human-operator']);
-const NOTIFY_MAIN_HUMAN_ALIASES = new Set(['ronghui', '荣晖']);
+/** 人类主体别名，从环境变量 TICKET_HUMAN_PRINCIPAL_ALIASES 注入（逗号分隔）。
+ *  示例：TICKET_HUMAN_PRINCIPAL_ALIASES="alice,bob" */
+const rawAliases = (process.env.TICKET_HUMAN_PRINCIPAL_ALIASES || '').split(',').map(s => s.trim()).filter(Boolean);
+const HUMAN_PRINCIPAL_ALIASES = new Set(rawAliases.length > 0 ? rawAliases : ['example-human-operator']);
+
+/** 路由到 NOTIFY_MAIN_SESSION 的人类主体别名（子集）。
+ *  从 TICKET_NOTIFY_MAIN_HUMAN_ALIASES 注入（逗号分隔），为空时回退到 TICKET_HUMAN_PRINCIPAL_ALIASES。
+ *  示例：TICKET_NOTIFY_MAIN_HUMAN_ALIASES="boss,admin" */
+const rawNotifyMain = (process.env.TICKET_NOTIFY_MAIN_HUMAN_ALIASES || '').split(',').map(s => s.trim()).filter(Boolean);
+const NOTIFY_MAIN_HUMAN_ALIASES = new Set(rawNotifyMain.length > 0 ? rawNotifyMain : rawAliases);
 
 const NOTIFICATION_SESSION_POLICY = {
   done: 'reviewer_ticket',
@@ -19,8 +27,9 @@ const NOTIFICATION_SESSION_POLICY = {
   blocked: 'main',
 };
 
-/** 通知目标：老大/主会话（固定） - 直发 Telegram */
-export const NOTIFY_MAIN_SESSION = 'agent:main:telegram:direct:8290057699';
+/** 通知目标主会话 Key（固定），从环境变量 TICKET_NOTIFY_MAIN_SESSION_KEY 注入。
+ *  示例：TICKET_NOTIFY_MAIN_SESSION_KEY="agent:main:telegram:direct:1234567890" */
+export const NOTIFY_MAIN_SESSION = process.env.TICKET_NOTIFY_MAIN_SESSION_KEY || 'agent:main:telegram:direct:0000000000';
 
 export function getNotifyMainSessionKey() {
   return NOTIFY_MAIN_SESSION;

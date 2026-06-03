@@ -15,7 +15,7 @@ const GENERATED_PATTERNS = [
   { label: 'untracked sqlite runtime db', dir: 'data', match: (name) => /^(dispatch|ticket-platform-v2|ticket-system)\.sqlite(?:-shm|-wal)?$/.test(name) || /^(dispatch|ticket-platform-v2|ticket-system)\.db(?:-shm|-wal)?$/.test(name) },
   { label: 'sqlite backup/corrupt artifact', dir: 'data', match: (name) => /^tickets\.db\.(bak|corrupt).*|^tickets\.pre-reset.*\.db(?:-shm|-wal)?$/.test(name) },
   { label: 'backup sqlite sidecar', dir: 'data/backups', match: (name) => /^.*\.db(?:-shm|-wal)$/.test(name) },
-  { label: 'backup auto directory', dir: 'data/backups', match: (name) => name === 'auto' },
+  
   { label: 'memory scratch directory', dir: '.', match: (name) => name === 'memory' },
   { label: 'tmp scratch directory', dir: '.', match: (name) => name === 'tmp' },
   { label: 'root rollout artifacts', dir: '.', match: (name) => name === '.rollout' },

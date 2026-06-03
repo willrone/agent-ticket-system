@@ -15,7 +15,7 @@ function chooseCli(envValue, candidates, fallback) {
   return fallback;
 }
 
-const OPENCLAW_CLI = chooseCli(process.env.OPENCLAW_CLI, ['/opt/homebrew/bin/openclaw', '/Users/ronghui/.local/bin/openclaw'], 'openclaw');
+const OPENCLAW_CLI = chooseCli(process.env.OPENCLAW_CLI, ['/opt/homebrew/bin/openclaw'], 'openclaw');
 const SSH_CLI = chooseCli(process.env.SSH_CLI, ['/usr/bin/ssh'], 'ssh');
 
 function parseJsonOutput(stdout) {

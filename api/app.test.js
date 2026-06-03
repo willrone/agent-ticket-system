@@ -975,8 +975,7 @@ describe('PATCH /api/tickets/:id / POST /api/tickets/:id/transition', () => {
     const readyItem = dispatchRes.body.ready.find((item) => item.ticket_id === ticketId);
     expect(readyItem).toBeDefined();
     expect(readyItem.agent).toBe('example-human-operator');
-    expect(readyItem.target_session_key).toBe(`agent:main:ticket:${ticketId}`);
-    expect(readyItem.target_session_key).not.toBe(getNotifyMainSessionKey());
+    expect(readyItem.target_session_key).toBe(getNotifyMainSessionKey());
     expect(readyItem.dedupe_key).toBe('dispatch:done:assignment:example-human-operator');
   });
 
@@ -2099,7 +2098,7 @@ describe('GET /api/dispatch/ready', () => {
     expect(item.workflow_mismatch.reason).toBeDefined();
     expect(item.target_gateway_id).toBe('mac-main');
     expect(item.transport).toBe('local_cli');
-    expect(item.target_session_key).toBe(`agent:main:ticket:${ticketId}`);
+    expect(item.target_session_key).toBe(getNotifyMainSessionKey());
     expect(item.reset_session).toBeUndefined();
     expect(item.reason).toBe('decision_required');
     expect(item.dedupe_key).toBe(`dispatch:running:workflow_mismatch:example-human-operator:decision_required`);
@@ -3045,7 +3044,7 @@ describe('notifications 去重闭环', () => {
     const dispatchItem = dispatchRes.body.ready.find((x) => x.ticket_id === ticketId);
     expect(dispatchItem).toBeDefined();
     expect(dispatchItem.agent).toBe('example-human-operator');
-    expect(dispatchItem.target_session_key).toBe(`agent:main:ticket:${ticketId}`);
+    expect(dispatchItem.target_session_key).toBe(getNotifyMainSessionKey());
     expect(dispatchItem.dedupe_key).toBe('dispatch:done:assignment:example-human-operator');
   });
 });
@@ -3919,6 +3918,72 @@ describe('audit result contract + nudge loop', () => {
 
     const afterStart = await request(app).get('/api/dispatch/ready').expect(200);
     expect(afterStart.body.ready.find((entry) => entry.ticket_id === ticketId && entry.kind === 'nudge')).toBeUndefined();
+  });
+
+  it('queued stale 催办不会给 reviewer 升级对象附带 stale review assignment contract', async () => {
+    const createRes = await request(app)
+      .post('/api/tickets')
+      .send({
+        title: 'Queued stale should not reuse reviewer assignment',
+        description: 'Desc',
+        assigned_agent: 'beavy',
+        triage_owner: 'leoss',
+        review_owner: 'leoss',
+      })
+      .expect(201);
+    const ticketId = createRes.body.id;
+
+    await request(app)
+      .post(`/api/tickets/${ticketId}/transition`)
+      .send({ action: 'queue', actor: 'leoss' })
+      .expect(200);
+
+    const initialReady = await request(app).get('/api/dispatch/ready').expect(200);
+    const initialDispatch = initialReady.body.ready.find((entry) => entry.ticket_id === ticketId && !entry.kind);
+    expect(initialDispatch).toBeDefined();
+    await request(app).post(`/api/dispatch/${initialDispatch.dispatch_id}/ack`).expect(200);
+
+    const staleReviewerDispatchId = recordDispatchEvent(ticketId, 'leoss', 'review');
+    const staleReviewerAssignment = createOrReuseAssignment({
+      assignment_id: `asg_test_${ticketId}_leoss_review_stale`,
+      ticket_id: ticketId,
+      dispatch_event_id: staleReviewerDispatchId,
+      agent_id: 'leoss',
+      execution_mode: 'direct',
+      assignment_status: 'delivered',
+      intent: 'dispatch',
+      role: 'review',
+      stage: 'review',
+      target_session_key: `agent:leoss:ticket:${ticketId}`,
+      transport: 'local_cli',
+    });
+
+    const staleTime = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    updateTicket(ticketId, { last_update: staleTime });
+
+    const nudgeReady = await request(app).get('/api/dispatch/ready').expect(200);
+    const nudges = nudgeReady.body.ready.filter((entry) => entry.ticket_id === ticketId && entry.kind === 'nudge');
+    const reviewerNudge = nudges.find((entry) => entry.agent === 'leoss');
+    const executorNudge = nudges.find((entry) => entry.agent === 'beavy');
+    expect(reviewerNudge).toEqual(expect.objectContaining({
+      status: 'queued',
+      nudge_source: 'queued_stale',
+      nudge_level: 'L2',
+      reason: 'nudge_l2_queued_stale',
+    }));
+    expect(reviewerNudge.message).toContain('催办对象：leoss');
+    expect(reviewerNudge.message).not.toContain('【Agent-Facing Assignment Contract】');
+    expect(reviewerNudge.message).not.toContain(staleReviewerAssignment.assignment_id);
+    expect(reviewerNudge.message).not.toContain('当前阶段=queued：receipt 后要尽快进入实际执行');
+
+    expect(executorNudge).toEqual(expect.objectContaining({
+      status: 'queued',
+      nudge_source: 'queued_stale',
+      nudge_level: 'L2',
+      reason: 'nudge_l2_queued_stale',
+    }));
+    expect(executorNudge.message).toContain('【Agent-Facing Assignment Contract】');
+    expect(executorNudge.message).toContain(`assignment_id: ${initialDispatch.assignment_id}`);
   });
 
   async function createQueuedStaleAfterReceiptAudit(ticketId, {
@@ -9574,7 +9639,7 @@ describe('agent-facing ticket action APIs', () => {
       .post('/api/v1/registry/agents/register')
       .send({
         agent_id: 'eagle',
-        display_name: '小鹰',
+        display_name: 'Eagle',
         roles: ['reviewer'],
         domains: ['stock-platform'],
         gateway: 'pc-stock',
@@ -9601,7 +9666,7 @@ describe('agent-facing ticket action APIs', () => {
 
     expect(participantRes.body.data).toEqual(expect.objectContaining({
       participant_id: 'eagle',
-      display_name: '小鹰',
+      display_name: 'Eagle',
       primary_platform: 'stock-platform',
       source_kind: 'agent_registration',
       platform_roles: expect.arrayContaining(['review_owner']),

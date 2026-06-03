@@ -2917,7 +2917,12 @@ function buildAuditResultCommentContent(ticket, auditResult) {
 }
 
 function buildQueuedStaleNudgeMessage({ ticket, agent, staleMinutes, nudgeLevel, slaMinutes }) {
-  const assignment = store.findLatestAssignmentForTicket(ticket.id, agent);
+  const assignedAgent = normalizeOptionalAgent(ticket.assigned_agent || ticket.next_actor);
+  const normalizedAgent = normalizeOptionalAgent(agent);
+  const latestAssignment = normalizedAgent && normalizedAgent === assignedAgent
+    ? store.findLatestAssignmentForTicket(ticket.id, normalizedAgent)
+    : null;
+  const assignment = latestAssignment?.stage === ticket.status ? latestAssignment : null;
   const waitingForWorker = ticket.dispatch_state === 'receipt_accepted'
     && ticket.last_dispatch_receipt_decision === 'accepted'
     && Boolean(ticket.execution_guard?.requires_worker)
