@@ -56,6 +56,10 @@ cat > "$PLIST_PATH" <<PLIST
     <string>${TICKET_BACKUP_BEFORE_START:-true}</string>
     <key>NODE_BIN</key>
     <string>${NODE_BIN:-/opt/homebrew/bin/node}</string>
+    <key>OPENCLAW_CLI</key>
+    <string>${OPENCLAW_CLI:-/opt/homebrew/bin/openclaw}</string>
+    <key>SSH_CLI</key>
+    <string>${SSH_CLI:-/usr/bin/ssh}</string>
   </dict>
   <key>StandardOutPath</key>
   <string>$LOG_DIR/api.out.log</string>
@@ -64,6 +68,7 @@ cat > "$PLIST_PATH" <<PLIST
 </dict>
 </plist>
 PLIST
+chmod 644 "$PLIST_PATH"
 launchctl bootout gui/$(id -u) "$PLIST_PATH" 2>/dev/null || true
 launchctl bootstrap gui/$(id -u) "$PLIST_PATH"
 launchctl kickstart -k gui/$(id -u)/$LAUNCH_LABEL

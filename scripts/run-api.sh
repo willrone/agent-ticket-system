@@ -16,6 +16,14 @@ fi
 : "${NODE_BIN:=/opt/homebrew/bin/node}"
 : "${TICKET_API_PORT:=8788}"
 
+# Harden delivery CLI resolution against polluted shell environments such as OPENCLAW_CLI=1.
+if [[ -z "${OPENCLAW_CLI:-}" || "${OPENCLAW_CLI:-}" == "1" || "${OPENCLAW_CLI:-}" == "true" || "${OPENCLAW_CLI:-}" == "false" ]]; then
+  export OPENCLAW_CLI="${TICKET_OPENCLAW_CLI:-/opt/homebrew/bin/openclaw}"
+fi
+if [[ -z "${SSH_CLI:-}" || "${SSH_CLI:-}" == "1" || "${SSH_CLI:-}" == "true" || "${SSH_CLI:-}" == "false" ]]; then
+  export SSH_CLI="${TICKET_SSH_CLI:-/usr/bin/ssh}"
+fi
+
 DEFAULT_DB_PATH="$REPO_DIR/data/tickets.db"
 if [[ -z "${TICKETS_DB_PATH:-}" ]]; then
   if [[ "$TICKET_API_PORT" == "8788" ]]; then

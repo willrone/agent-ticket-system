@@ -12,7 +12,6 @@ const GENERATED_PATTERNS = [
   { label: 'api test sqlite db', dir: 'api/data', match: (name) => /^test-.*\.db(?:-shm|-wal)?$/.test(name) },
   { label: 'api legacy sqlite db', dir: 'api/data', match: (name) => /^legacy-.*\.db(?:-shm|-wal)?$/.test(name) },
   { label: 'stray local sqlite db clone', dir: 'data', match: (name) => /^agent-ticket-system\.db(?:-shm|-wal)?$/.test(name) },
-  { label: 'canonical sqlite sidecar', dir: 'data', match: (name) => /^tickets\.db-(?:shm|wal)$/.test(name) },
   { label: 'untracked sqlite runtime db', dir: 'data', match: (name) => /^(dispatch|ticket-platform-v2|ticket-system)\.sqlite(?:-shm|-wal)?$/.test(name) || /^(dispatch|ticket-platform-v2|ticket-system)\.db(?:-shm|-wal)?$/.test(name) },
   { label: 'sqlite backup/corrupt artifact', dir: 'data', match: (name) => /^tickets\.db\.(bak|corrupt).*|^tickets\.pre-reset.*\.db(?:-shm|-wal)?$/.test(name) },
   { label: 'backup sqlite sidecar', dir: 'data/backups', match: (name) => /^.*\.db(?:-shm|-wal)$/.test(name) },
