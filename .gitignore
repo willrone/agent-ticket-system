@@ -39,3 +39,13 @@ api/data/legacy-*.db-wal
 *.njsproj
 *.sln
 *.sw?
+# Runtime SQLite databases (kept local; not release artifacts)
+data/*.db
+data/*.sqlite
+data/*.db-*
+data/*.sqlite-*
+data/backups/**/*.db
+data/backups/**/*.sqlite
+api/data/*.db
+api/data/*.sqlite
+

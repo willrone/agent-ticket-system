@@ -1,8 +1,22 @@
 import { spawn } from 'child_process';
+import fs from 'fs';
 import { getGatewayById, getSshDestination } from './agent-topology.js';
 
-const OPENCLAW_CLI = process.env.OPENCLAW_CLI || 'openclaw';
-const SSH_CLI = process.env.SSH_CLI || 'ssh';
+function isInvalidCliValue(value) {
+  const normalized = String(value || '').trim();
+  return !normalized || normalized === '1' || normalized === 'true' || normalized === 'false';
+}
+
+function chooseCli(envValue, candidates, fallback) {
+  if (!isInvalidCliValue(envValue)) return String(envValue).trim();
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return fallback;
+}
+
+const OPENCLAW_CLI = chooseCli(process.env.OPENCLAW_CLI, ['/opt/homebrew/bin/openclaw', '/Users/ronghui/.local/bin/openclaw'], 'openclaw');
+const SSH_CLI = chooseCli(process.env.SSH_CLI, ['/usr/bin/ssh'], 'ssh');
 
 function parseJsonOutput(stdout) {
   try {
@@ -14,6 +28,9 @@ function parseJsonOutput(stdout) {
 
 function runCommand(command, args, label) {
   return new Promise((resolve, reject) => {
+    if (isInvalidCliValue(command)) {
+      return reject(new Error(`${label} invalid command: ${String(command || '')}`));
+    }
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';

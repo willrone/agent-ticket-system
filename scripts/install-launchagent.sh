@@ -5,8 +5,24 @@ REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 LAUNCH_LABEL="${TICKET_LAUNCHAGENT_LABEL:-ai.openclaw.ticket-platform-api}"
 PLIST_PATH="${TICKET_LAUNCHAGENT_PLIST_PATH:-$HOME/Library/LaunchAgents/${LAUNCH_LABEL}.plist}"
 LOG_DIR="${TICKET_API_LOG_DIR:-$REPO_DIR/logs}"
+ENV_FILE="${TICKET_ENV_FILE:-$HOME/.config/ticket-platform/live.env}"
 RUN_API_SCRIPT="${TICKET_RUN_API_SCRIPT:-$REPO_DIR/scripts/run-api.sh}"
 mkdir -p "$LOG_DIR" "$(dirname -- "$PLIST_PATH")"
+
+# Harden plist against polluted shell environments such as OPENCLAW_CLI=1.
+if [[ -z "${OPENCLAW_CLI:-}" || "${OPENCLAW_CLI:-}" == "1" || "${OPENCLAW_CLI:-}" == "true" || "${OPENCLAW_CLI:-}" == "false" ]]; then
+  OPENCLAW_CLI="${TICKET_OPENCLAW_CLI:-/opt/homebrew/bin/openclaw}"
+fi
+if [[ -z "${SSH_CLI:-}" || "${SSH_CLI:-}" == "1" || "${SSH_CLI:-}" == "true" || "${SSH_CLI:-}" == "false" ]]; then
+  SSH_CLI="${TICKET_SSH_CLI:-/usr/bin/ssh}"
+fi
+
+if [[ -z "${OPENCLAW_CLI:-}" || "${OPENCLAW_CLI:-}" == "1" || "${OPENCLAW_CLI:-}" == "true" || "${OPENCLAW_CLI:-}" == "false" ]]; then
+  OPENCLAW_CLI="${TICKET_OPENCLAW_CLI:-/opt/homebrew/bin/openclaw}"
+fi
+if [[ -z "${SSH_CLI:-}" || "${SSH_CLI:-}" == "1" || "${SSH_CLI:-}" == "true" || "${SSH_CLI:-}" == "false" ]]; then
+  SSH_CLI="${TICKET_SSH_CLI:-/usr/bin/ssh}"
+fi
 cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -29,6 +45,8 @@ cat > "$PLIST_PATH" <<PLIST
   <dict>
     <key>PATH</key>
     <string>${PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}</string>
+    <key>TICKET_ENV_FILE</key>
+    <string>$ENV_FILE</string>
     <key>TICKETS_DB_PATH</key>
     <string>${TICKETS_DB_PATH:-$REPO_DIR/data/tickets.db}</string>
     <key>TICKET_INTERNAL_POLLERS_ENABLED</key>
@@ -44,7 +62,7 @@ cat > "$PLIST_PATH" <<PLIST
     <key>TICKET_API_PORT</key>
     <string>${TICKET_API_PORT:-8788}</string>
     <key>TICKET_API_BIND_HOST</key>
-    <string>${TICKET_API_BIND_HOST:-127.0.0.1}</string>
+    <string>${TICKET_API_BIND_HOST:-0.0.0.0}</string>
     <key>TICKET_API_LOCAL_BASE_URL</key>
     <string>${TICKET_API_LOCAL_BASE_URL:-http://127.0.0.1:${TICKET_API_PORT:-8788}}</string>
     <key>TICKET_API_HEALTHCHECK_BASE_URL</key>
@@ -53,6 +71,10 @@ cat > "$PLIST_PATH" <<PLIST
     <string>${TICKET_BACKUP_BEFORE_START:-true}</string>
     <key>NODE_BIN</key>
     <string>${NODE_BIN:-/opt/homebrew/bin/node}</string>
+    <key>OPENCLAW_CLI</key>
+    <string>${OPENCLAW_CLI:-/opt/homebrew/bin/openclaw}</string>
+    <key>SSH_CLI</key>
+    <string>${SSH_CLI:-/usr/bin/ssh}</string>
   </dict>
   <key>StandardOutPath</key>
   <string>$LOG_DIR/api.out.log</string>
@@ -61,6 +83,7 @@ cat > "$PLIST_PATH" <<PLIST
 </dict>
 </plist>
 PLIST
+chmod 644 "$PLIST_PATH"
 launchctl bootout gui/$(id -u) "$PLIST_PATH" 2>/dev/null || true
 launchctl bootstrap gui/$(id -u) "$PLIST_PATH"
 launchctl kickstart -k gui/$(id -u)/$LAUNCH_LABEL

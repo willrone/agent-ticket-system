@@ -225,25 +225,25 @@ function buildDerivedCommentWorkers(ticket = {}, options = {}) {
     if (!/worker_session|worker_run_id|worker_status|worker_type|worker_label|worker_summary|run_id/u.test(text)) return;
 
     const sessionKey = extractFirstMatch(text, [
-      /(?:^|\n)[\-*•]?\s*worker_session_key\s*[:=]\s*([^\s]+)\s*(?=\n|$)/imu,
-      /(?:^|\n)[\-*•]?\s*worker_session\s*[:=]\s*([^\s]+)\s*(?=\n|$)/imu,
+      /(?:^|\n)[-*•]?\s*worker_session_key\s*[:=]\s*([^\s]+)\s*(?=\n|$)/imu,
+      /(?:^|\n)[-*•]?\s*worker_session\s*[:=]\s*([^\s]+)\s*(?=\n|$)/imu,
     ]);
     const runId = extractFirstMatch(text, [
-      /(?:^|\n)[\-*•]?\s*worker_run_id\s*[:=]\s*([^\s]+)\s*(?=\n|$)/imu,
-      /(?:^|\n)[\-*•]?\s*run_id\s*[:=]\s*([^\s]+)\s*(?=\n|$)/imu,
+      /(?:^|\n)[-*•]?\s*worker_run_id\s*[:=]\s*([^\s]+)\s*(?=\n|$)/imu,
+      /(?:^|\n)[-*•]?\s*run_id\s*[:=]\s*([^\s]+)\s*(?=\n|$)/imu,
     ]);
     if (!sessionKey && !runId) return;
 
     const reportType = extractAgentReportType(text);
     const workerType = normalizeWorkerType(extractFirstMatch(text, [
-      /(?:^|\n)[\-*•]?\s*worker_type\s*[:=]\s*(subagent|acp|direct)\s*(?=\n|$)/imu,
+      /(?:^|\n)[-*•]?\s*worker_type\s*[:=]\s*(subagent|acp|direct)\s*(?=\n|$)/imu,
     ])) || expectedWorkerType;
     if (expectedWorkerType && workerType && workerType !== expectedWorkerType) return;
 
     const timestamp = cleanText(comment?.timestamp || comment?.created_at || comment?.updated_at) || new Date().toISOString();
     const status = inferDerivedWorkerStatus(
       extractFirstMatch(text, [
-        /(?:^|\n)[\-*•]?\s*worker_status\s*[:=]\s*(starting|running|succeeded|failed|timed_out|cancelled)\s*(?=\n|$)/imu,
+        /(?:^|\n)[-*•]?\s*worker_status\s*[:=]\s*(starting|running|succeeded|failed|timed_out|cancelled)\s*(?=\n|$)/imu,
       ]),
       reportType,
     );
@@ -256,10 +256,10 @@ function buildDerivedCommentWorkers(ticket = {}, options = {}) {
       session_key: sessionKey || null,
       run_id: runId || null,
       label: extractFirstMatch(text, [
-        /(?:^|\n)[\-*•]?\s*worker_label\s*[:=]\s*(.+?)\s*(?=\n|$)/imu,
+        /(?:^|\n)[-*•]?\s*worker_label\s*[:=]\s*(.+?)\s*(?=\n|$)/imu,
       ]) || buildDerivedWorkerKey(workerType, sessionKey, runId),
       summary: extractFirstMatch(text, [
-        /(?:^|\n)[\-*•]?\s*worker_summary\s*[:=]\s*(.+?)\s*(?=\n|$)/imu,
+        /(?:^|\n)[-*•]?\s*worker_summary\s*[:=]\s*(.+?)\s*(?=\n|$)/imu,
       ]) || `Derived from agent_report ${reportType || 'comment'}`,
       started_at: timestamp,
       last_heartbeat_at: timestamp,

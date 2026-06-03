@@ -1,6 +1,8 @@
 # Ticket System API Documentation
 
 > For ticket-platform truth and review policy, also see:
+> - [`docs/agent-first-run-guide.md`](./agent-first-run-guide.md)
+> - [`docs/platform-empty-state-onboarding.md`](./platform-empty-state-onboarding.md)
 > - [`docs/ticket-platform-current-state.md`](./ticket-platform-current-state.md)
 > - [`docs/ticket-platform-gap-analysis-and-plan.md`](./ticket-platform-gap-analysis-and-plan.md)
 > - [`docs/ticket-platform-doc-maintenance-policy.md`](./ticket-platform-doc-maintenance-policy.md)
@@ -1012,5 +1014,5 @@ curl -X POST http://127.0.0.1:8788/api/v1/admin/stock-tickets/76/transition \
 }
 ```
 
-**最后更新**：2026-03-12  
+**最后更新**：2026-03-12
 **版本**：v2.1（含 agent-admin stock 管理面）

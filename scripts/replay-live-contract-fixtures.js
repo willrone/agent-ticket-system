@@ -339,6 +339,7 @@ async function replayPendingDecisionBoundary(fixture) {
 }
 
 async function replayTerminalStageBoundary(fixture) {
+  void fixture;
   const details = [];
   let assertions = 0;
 

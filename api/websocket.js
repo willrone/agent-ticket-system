@@ -2,7 +2,6 @@
  * WebSocket Server for Real-time Ticket Updates
  */
 import { WebSocketServer } from 'ws';
-import * as store from './store.js';
 
 let wss = null;
 const clients = new Set();

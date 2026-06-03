@@ -609,7 +609,7 @@ export function buildTicketStageGateStatus(ticket = {}, options = {}) {
   } else if (blockedByWorkerEvidence) {
     state = 'at_risk';
     label = '缺 worker 证据';
-    summary = 'subagent queued 已 receipt，但还没有活跃 worker 执行证据（历史 succeeded 不算新的开工）。';
+    summary = 'subagent queued 已 receipt，但还没有真实 worker evidence / 活跃 worker 执行证据（历史 succeeded 不算新的开工）。';
   } else if (!hasActionPath) {
     state = 'unknown';
     label = '待补动作';

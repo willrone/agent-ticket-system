@@ -2,7 +2,6 @@
  * @vitest-environment node
  * 多 Agent 平台 registry shadow-mode API 测试
  */
-/* global process */
 import './test-setup.js';
 import path from 'path';
 import fs from 'fs';

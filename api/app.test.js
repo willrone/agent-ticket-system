@@ -25,12 +25,12 @@ import {
   markDispatchDeliveryFailed,
   recordDispatchEvent,
 } from './dispatch.js';
-import { getAuditSessionKeyForTicket, getNotificationSessionKey, getNotifyMainSessionKey } from './agent-session-router.js';
+import { getAuditSessionKeyForTicket, getNotifyMainSessionKey } from './agent-session-router.js';
 import { MAIN_GATEWAY_ID } from './agent-topology.js';
 import { AGENT_PLAYBOOK_VERSION } from './agent-facing.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TEST_DB = path.join(__dirname, 'data', 'test-tickets.db');
+const TEST_DB = process.env.TICKETS_DB_PATH || path.join(__dirname, 'data', 'test-tickets.db');
 
 function ensureCleanStore() {
   _resetDbForTesting();
@@ -3925,7 +3925,7 @@ describe('audit result contract + nudge loop', () => {
     dispatch,
     receiptKey,
     receiptMessage,
-    resultKey,
+    resultKey: _resultKey,
     resultReason,
   }) {
     const { updateTicket } = await import('./store.js');
@@ -5001,7 +5001,7 @@ describe('agent-facing task API MVP', () => {
       seed_status_via_store: true,
     });
 
-    const { ticket: reviewTicket } = await createReadyAssignment({
+    const { ticket: _reviewTicket } = await createReadyAssignment({
       title: 'Stock review',
       platform: 'stock-platform',
       assigned_agent: 'cowder',
@@ -6919,7 +6919,7 @@ describe('agent-facing task API MVP', () => {
   });
 
   it('submit_for_review 后 active execution workers 收为 terminal，reviewer 恢复出现在 dispatch/ready', async () => {
-    const { ticket, ready } = await createReadyAssignment({
+    const { ticket, ready: _ready } = await createReadyAssignment({
       execution_mode: 'subagent',
       max_active_workers: 1,
       review_owner: 'leoss',
@@ -7295,7 +7295,7 @@ describe('agent-facing task API MVP', () => {
     delete process.env.TICKET_AGENT_API_BASE_URL;
     delete process.env.TICKET_API_BASE_URL;
 
-    const { ticket: created, ready } = await createReadyAssignment({
+    const { ticket: _created, ready } = await createReadyAssignment({
       title: 'Remote agent-facing MVP',
       description: '验证远端 contract 不下发 localhost',
       assigned_agent: 'donky',

@@ -37,6 +37,9 @@ function makeChild(stdoutPayload = { ok: true }) {
 
 describe('delivery-transport', () => {
   beforeEach(() => {
+    vi.stubEnv('OPENCLAW_CLI', 'openclaw');
+    vi.stubEnv('SSH_CLI', 'ssh');
+    vi.resetModules();
     spawnMock.mockReset();
     spawnMock.mockImplementation(() => makeChild());
   });
@@ -135,3 +138,23 @@ describe('delivery-transport', () => {
     expect(result.send).toEqual({ ok: true, sent: true });
   });
 });
+
+
+  it('invalid OPENCLAW_CLI value falls back to absolute openclaw candidate', async () => {
+    vi.stubEnv('OPENCLAW_CLI', '1');
+    vi.stubEnv('SSH_CLI', 'ssh');
+    vi.resetModules();
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => makeChild());
+
+    const { deliverChatToGateway } = await import('./delivery-transport.js');
+    await deliverChatToGateway({
+      transport: 'local_cli',
+      targetSessionKey: 'agent:beavy:ticket:70',
+      message: 'hello',
+      idempotencyKey: 'idem-invalid-cli',
+    });
+
+    expect(spawnMock.mock.calls[0][0]).not.toBe('1');
+    expect(String(spawnMock.mock.calls[0][0])).toContain('openclaw');
+  });

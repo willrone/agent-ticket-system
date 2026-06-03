@@ -26,7 +26,7 @@ import {
 import { fetchAgentTopology, fetchBots } from '../api/tickets';
 import LoadingState from '../components/LoadingState';
 import ErrorState from '../components/ErrorState';
-import { clampUsage, getBotHealth, getBotLoad } from './botHealth';
+import { getBotHealth, getBotLoad } from './botHealth';
 
 function normalizeBots(payload) {
   const raw = Array.isArray(payload) ? payload : (payload?.bots ?? payload?.data ?? []);
@@ -130,7 +130,7 @@ function buildBotDerived(bot) {
   if (queueDepth >= 3) interventionReasons.push('队列堆积');
   if (bot.status === 'idle' && queueDepth > 0) interventionReasons.push('存在待处理但 Bot 未激活');
   if ((Number(bot.stats.successRate) || 0) < 85) interventionReasons.push('成功率偏低');
-  if (hasObservationTokenPressure) observationSignals.push('token watermark 偏高（观察项）');
+  if (hasObservationTokenPressure) observationSignals.push('token 使用率过高（观察项）');
 
   return {
     ...bot,
@@ -763,7 +763,7 @@ export default function BotStatus() {
                     <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${bot.health.tone}`}>{bot.health.label}</span>
                   </div>
                   <div className="mt-3 text-sm text-[var(--text-secondary)]">
-                    {bot.interventionReasons.length > 0 ? bot.interventionReasons.join(' / ') : bot.health.summary}
+                    {[...bot.interventionReasons, ...bot.observationSignals].length > 0 ? [...bot.interventionReasons, ...bot.observationSignals].join(' / ') : bot.health.summary}
                   </div>
                 </button>
               ))}

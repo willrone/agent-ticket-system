@@ -156,7 +156,7 @@ describe('ticket-selectors canonical helpers', () => {
       buildTicketViewModel({ id: 5, status: 'deprecated', created: '2026-03-07T10:00:00Z' }),
     ];
 
-    const { stats, statusDistribution, todaySummary, riskSummary } = buildDashboardMetrics(tickets, {
+    const { stats, statusDistribution, todaySummary: _todaySummary, riskSummary: _riskSummary } = buildDashboardMetrics(tickets, {
       now: new Date('2026-03-11T12:00:00Z'),
     });
 

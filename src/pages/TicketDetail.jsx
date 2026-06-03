@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   addComment,
@@ -306,48 +306,6 @@ function TicketDetail() {
   const [topology, setTopology] = useState(() => normalizeTopology({}));
   const [playbookSnapshot, setPlaybookSnapshot] = useState(null);
 
-  useEffect(() => {
-    loadTicket();
-    loadActions();
-    loadDependencies();
-    loadTopology();
-  }, [id]);
-
-  async function loadTicket() {
-    try {
-      setLoading(true);
-      const data = await getTicket(id);
-      const viewModel = buildTicketViewModel(data);
-      setTicket(viewModel);
-      setError(null);
-      await loadPlaybook(viewModel);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function loadActions() {
-    try {
-      const data = await getTicketActions(id);
-      setAvailableActions(data.available_actions || []);
-      setActionObjects(data.action_objects || []);
-    } catch (err) {
-      console.error('Failed to load actions:', err);
-    }
-  }
-
-  async function loadDependencies() {
-    try {
-      const data = await fetchTicketDependencies(id);
-      setDependencies(data.dependencies || []);
-      setDependents(data.dependents || []);
-    } catch (err) {
-      console.error('Failed to load dependencies:', err);
-    }
-  }
-
   function resolvePlaybookRole(ticketView) {
     if (!ticketView) return 'manager';
     if (ticketView.status === 'triage') return 'triage';
@@ -357,7 +315,7 @@ function TicketDetail() {
     return 'auditor';
   }
 
-  async function loadPlaybook(ticketView) {
+  const loadPlaybook = useCallback(async function loadPlaybook(ticketView) {
     if (!ticketView?.status) {
       setPlaybookSnapshot(null);
       return;
@@ -373,16 +331,58 @@ function TicketDetail() {
       console.error('Failed to load playbook snapshot:', err);
       setPlaybookSnapshot(null);
     }
-  }
+  }, []);
 
-  async function loadTopology() {
+  const loadTicket = useCallback(async function loadTicket() {
+    try {
+      setLoading(true);
+      const data = await getTicket(id);
+      const viewModel = buildTicketViewModel(data);
+      setTicket(viewModel);
+      setError(null);
+      await loadPlaybook(viewModel);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [id, loadPlaybook]);
+
+  const loadActions = useCallback(async function loadActions() {
+    try {
+      const data = await getTicketActions(id);
+      setAvailableActions(data.available_actions || []);
+      setActionObjects(data.action_objects || []);
+    } catch (err) {
+      console.error('Failed to load actions:', err);
+    }
+  }, [id]);
+
+  const loadDependencies = useCallback(async function loadDependencies() {
+    try {
+      const data = await fetchTicketDependencies(id);
+      setDependencies(data.dependencies || []);
+      setDependents(data.dependents || []);
+    } catch (err) {
+      console.error('Failed to load dependencies:', err);
+    }
+  }, [id]);
+
+  const loadTopology = useCallback(async function loadTopology() {
     try {
       const data = await fetchAgentTopology();
       setTopology(normalizeTopology(data));
     } catch (err) {
       console.error('Failed to load topology:', err);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    loadTicket();
+    loadActions();
+    loadDependencies();
+    loadTopology();
+  }, [loadTicket, loadActions, loadDependencies, loadTopology]);
 
   async function handleAddDependency() {
     const dependsOnId = parseInt(newDependencyId, 10);

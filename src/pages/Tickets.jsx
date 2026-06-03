@@ -124,10 +124,6 @@ function normalizeTickets(payload) {
   return sortTicketsNewestFirst(normalized.map((t) => buildTicketViewModel(t)));
 }
 
-function truncate(str, len = 12) {
-  if (!str) return '—';
-  return str.length <= len ? str : str.slice(0, len) + '…';
-}
 
 function truncateSessionKey(s, max = 12) {
   if (!s) return '—';
@@ -194,17 +190,21 @@ function isReviewerInboxTicket(ticket) {
 }
 
 function getInitialStockAdminToken() {
-  if (typeof window === 'undefined') return '';
+  if (typeof window === 'undefined' || !window.localStorage || typeof window.localStorage.getItem !== 'function') return '';
   return window.localStorage.getItem(STOCK_ADMIN_TOKEN_STORAGE_KEY) || '';
 }
 
 function persistStockAdminToken(token) {
-  if (typeof window === 'undefined') return;
+  if (typeof window === 'undefined' || !window.localStorage) return;
   if (token) {
-    window.localStorage.setItem(STOCK_ADMIN_TOKEN_STORAGE_KEY, token);
+    if (typeof window.localStorage.setItem === 'function') {
+      window.localStorage.setItem(STOCK_ADMIN_TOKEN_STORAGE_KEY, token);
+    }
     return;
   }
-  window.localStorage.removeItem(STOCK_ADMIN_TOKEN_STORAGE_KEY);
+  if (typeof window.localStorage.removeItem === 'function') {
+    window.localStorage.removeItem(STOCK_ADMIN_TOKEN_STORAGE_KEY);
+  }
 }
 
 function getReviewerLaneMeta(ticket) {

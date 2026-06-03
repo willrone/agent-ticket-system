@@ -6,7 +6,6 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import { randomBytes } from 'crypto';
-import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { normalizeCommentShape, buildCommentId, parseJsonArray } from './comment-utils.js';
 import {
@@ -44,10 +43,13 @@ function getTicketRelationLabel(relationType) {
 }
 
 function getDbPath() {
+  if (process.env.TICKETS_DB_PATH) {
+    return process.env.TICKETS_DB_PATH;
+  }
   if (process.env.NODE_ENV === 'test') {
     return ':memory:';
   }
-  return process.env.TICKETS_DB_PATH || path.join(__dirname, '..', 'data', 'tickets.db');
+  return path.join(__dirname, '..', 'data', 'tickets.db');
 }
 
 function getDb() {
@@ -144,16 +146,6 @@ function parseJsonObject(value, fallback = {}) {
   }
 }
 
-function parseReviewPlanReviewState(value) {
-  if (value == null || value === '') return null;
-  if (typeof value === 'object') return value;
-  try {
-    const p = JSON.parse(value);
-    return p && typeof p === 'object' ? p : null;
-  } catch {
-    return null;
-  }
-}
 
 function parseJsonBoolean(value, fallback = false) {
   if (value == null || value === '') return fallback;

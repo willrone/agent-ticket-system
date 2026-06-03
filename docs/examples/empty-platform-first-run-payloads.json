@@ -1,0 +1,136 @@
+{
+  "name": "empty-platform-first-run-payloads",
+  "version": "2026-06-02",
+  "api_base_url": "http://127.0.0.1:8788",
+  "registry_agent_registration": {
+    "method": "POST",
+    "path": "/api/v1/registry/agents/register",
+    "body": {
+      "agent_id": "executor01",
+      "display_name": "Executor 01",
+      "roles": ["executor"],
+      "domains": ["ticket-platform"],
+      "gateway": "mac-main",
+      "session_binding": "agent:executor01:main",
+      "capacity": 1,
+      "priority": 100,
+      "status": "online"
+    }
+  },
+  "registry_agent_heartbeat": {
+    "method": "POST",
+    "path": "/api/v1/registry/agents/heartbeat",
+    "body": {
+      "agent_id": "executor01",
+      "status": "online",
+      "active_load": 0,
+      "capacity": 1,
+      "metadata": {
+        "runtime": "openclaw",
+        "session_binding": "agent:executor01:main"
+      }
+    }
+  },
+  "registry_route_resolve": {
+    "method": "POST",
+    "path": "/api/v1/registry/resolve",
+    "body": {
+      "domain": "ticket-platform",
+      "required_role": "executor"
+    }
+  },
+  "agent_route_resolve": {
+    "method": "GET",
+    "path": "/api/v1/agent/routing/resolve",
+    "query": {
+      "participant_id": "executor01",
+      "platform_id": "ticket-platform",
+      "role_key": "executor",
+      "reason": "empty-state-smoke",
+      "intent": "dispatch",
+      "session_kind": "ticket",
+      "ticket_id": 123
+    }
+  },
+  "first_smoke_ticket": {
+    "method": "POST",
+    "path": "/api/v1/agent/tickets",
+    "body": {
+      "title": "Empty-state routing smoke",
+      "description": "Verify newly registered agent routing can receive and process a minimal ticket.",
+      "platform": "ticket-platform",
+      "triage_owner": "planner01",
+      "assigned_agent": "executor01",
+      "review_owner": "reviewer01"
+    }
+  },
+  "first_report_payloads": {
+    "mcp_submit_report_dispatch_receipt": {
+      "assignment_id": "<assignment_id>",
+      "report_type": "dispatch_receipt",
+      "idempotency_key": "assignment:<assignment_id>:dispatch_receipt",
+      "payload": {
+        "receipt": {
+          "dispatch_id": 456,
+          "ticket_id": 123,
+          "stage": "queued",
+          "agent": "executor01",
+          "decision": "accepted",
+          "message": "Assignment received; continuing through the current stage contract."
+        }
+      }
+    },
+    "http_report_dispatch_receipt": {
+      "method": "POST",
+      "path": "/api/v1/agent/assignments/<assignment_id>/reports",
+      "headers": {
+        "X-Assignment-Token": "<assignment_token>"
+      },
+      "body": {
+        "report_type": "dispatch_receipt",
+        "idempotency_key": "assignment:<assignment_id>:dispatch_receipt",
+        "receipt": {
+          "dispatch_id": 456,
+          "ticket_id": 123,
+          "stage": "queued",
+          "agent": "executor01",
+          "decision": "accepted",
+          "message": "Assignment received; continuing through the current stage contract."
+        }
+      }
+    },
+    "http_heartbeat": {
+      "method": "POST",
+      "path": "/api/v1/agent/assignments/<assignment_id>/heartbeat",
+      "headers": {
+        "X-Assignment-Token": "<assignment_token>"
+      },
+      "body": {
+        "idempotency_key": "assignment:<assignment_id>:heartbeat:kickoff",
+        "progress": {
+          "status": "running",
+          "message": "Working on the smoke ticket.",
+          "step": "kickoff",
+          "percent": 10
+        }
+      }
+    },
+    "http_progress_update": {
+      "method": "POST",
+      "path": "/api/v1/agent/assignments/<assignment_id>/reports",
+      "headers": {
+        "X-Assignment-Token": "<assignment_token>"
+      },
+      "body": {
+        "report_type": "progress_update",
+        "idempotency_key": "assignment:<assignment_id>:progress:kickoff",
+        "summary": "Smoke ticket accepted and bootstrap checks are in progress.",
+        "progress": {
+          "status": "in_progress",
+          "percent": 25,
+          "message": "Validated assignment context; preparing final smoke result."
+        }
+      }
+    }
+  }
+}

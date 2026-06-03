@@ -2,7 +2,6 @@
  * @vitest-environment node
  * Assignment Contract v2 shadow-mode tests
  */
-/* global process */
 import './test-setup.js';
 import path from 'path';
 import fs from 'fs';
