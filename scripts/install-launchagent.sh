@@ -5,6 +5,7 @@ REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 LAUNCH_LABEL="${TICKET_LAUNCHAGENT_LABEL:-ai.openclaw.ticket-platform-api}"
 PLIST_PATH="${TICKET_LAUNCHAGENT_PLIST_PATH:-$HOME/Library/LaunchAgents/${LAUNCH_LABEL}.plist}"
 LOG_DIR="${TICKET_API_LOG_DIR:-$REPO_DIR/logs}"
+ENV_FILE="${TICKET_ENV_FILE:-$HOME/.config/ticket-platform/live.env}"
 RUN_API_SCRIPT="${TICKET_RUN_API_SCRIPT:-$REPO_DIR/scripts/run-api.sh}"
 mkdir -p "$LOG_DIR" "$(dirname -- "$PLIST_PATH")"
 cat > "$PLIST_PATH" <<PLIST
@@ -29,6 +30,8 @@ cat > "$PLIST_PATH" <<PLIST
   <dict>
     <key>PATH</key>
     <string>${PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}</string>
+    <key>TICKET_ENV_FILE</key>
+    <string>$ENV_FILE</string>
     <key>TICKETS_DB_PATH</key>
     <string>${TICKETS_DB_PATH:-$REPO_DIR/data/tickets.db}</string>
     <key>TICKET_INTERNAL_POLLERS_ENABLED</key>
@@ -44,7 +47,7 @@ cat > "$PLIST_PATH" <<PLIST
     <key>TICKET_API_PORT</key>
     <string>${TICKET_API_PORT:-8788}</string>
     <key>TICKET_API_BIND_HOST</key>
-    <string>${TICKET_API_BIND_HOST:-127.0.0.1}</string>
+    <string>${TICKET_API_BIND_HOST:-0.0.0.0}</string>
     <key>TICKET_API_LOCAL_BASE_URL</key>
     <string>${TICKET_API_LOCAL_BASE_URL:-http://127.0.0.1:${TICKET_API_PORT:-8788}}</string>
     <key>TICKET_API_HEALTHCHECK_BASE_URL</key>

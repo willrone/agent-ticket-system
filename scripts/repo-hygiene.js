@@ -8,7 +8,7 @@ const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
 
 const GENERATED_PATTERNS = [
-  { label: 'api sqlite runtime db', dir: 'api/data', match: (name) => /.*\.db(?:-shm|-wal)?$/.test(name) },
+  { label: 'api sqlite runtime db', dir: 'api/data', match: (name) => /^(?!test-|legacy-).*\.db(?:-shm|-wal)?$/.test(name) },
   { label: 'api test sqlite db', dir: 'api/data', match: (name) => /^test-.*\.db(?:-shm|-wal)?$/.test(name) },
   { label: 'api legacy sqlite db', dir: 'api/data', match: (name) => /^legacy-.*\.db(?:-shm|-wal)?$/.test(name) },
   { label: 'stray local sqlite db clone', dir: 'data', match: (name) => /^agent-ticket-system\.db(?:-shm|-wal)?$/.test(name) },

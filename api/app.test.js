@@ -30,7 +30,7 @@ import { MAIN_GATEWAY_ID } from './agent-topology.js';
 import { AGENT_PLAYBOOK_VERSION } from './agent-facing.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TEST_DB = path.join(__dirname, 'data', 'test-tickets.db');
+const TEST_DB = process.env.TICKETS_DB_PATH || path.join(__dirname, 'data', 'test-tickets.db');
 
 function ensureCleanStore() {
   _resetDbForTesting();
