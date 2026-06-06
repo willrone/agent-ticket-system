@@ -446,7 +446,7 @@ const Dashboard = () => {
   }, []);
 
   useEffect(() => {
-    loadMetrics();
+    void Promise.resolve().then(loadMetrics);
   }, [loadMetrics]);
 
   const stats = useMemo(() => {

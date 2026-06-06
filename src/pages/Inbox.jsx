@@ -112,7 +112,7 @@ export default function Inbox() {
   }
 
   useEffect(() => {
-    loadData();
+    void Promise.resolve().then(loadData);
   }, []);
 
   const items = useMemo(() => lanes[activeTab] || [], [activeTab, lanes]);

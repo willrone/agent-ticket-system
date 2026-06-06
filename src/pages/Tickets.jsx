@@ -268,7 +268,7 @@ const Tickets = () => {
   }, [stockAdminToken]);
 
   useEffect(() => {
-    loadData();
+    void Promise.resolve().then(loadData);
   }, [loadData]);
 
   const stats = useMemo(

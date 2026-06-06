@@ -378,10 +378,12 @@ function TicketDetail() {
   }, []);
 
   useEffect(() => {
-    loadTicket();
-    loadActions();
-    loadDependencies();
-    loadTopology();
+    void Promise.resolve().then(() => {
+      loadTicket();
+      loadActions();
+      loadDependencies();
+      loadTopology();
+    });
   }, [loadTicket, loadActions, loadDependencies, loadTopology]);
 
   async function handleAddDependency() {

@@ -94,9 +94,12 @@ import {
   DEFAULT_ROLE_CONTRACTS,
   DEFAULT_WORKFLOW_TEMPLATES,
 } from './platform-registry-defaults.js';
+import { createLogger } from './logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const logger = createLogger('api');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -1340,7 +1343,10 @@ function maybeAutoStartQueuedTicketAfterWorkerChange(ticketId, worker = {}) {
   });
 
   if (!started?.success && started?.error !== 'AGENT_ACTION_NOT_ALLOWED') {
-    console.warn(`[workers] auto start queued ticket #${ticket.id} skipped: ${started?.error || 'unknown error'}`);
+    logger.warn('auto start queued ticket skipped', {
+      ticket_id: ticket.id,
+      error: started?.error || 'unknown error',
+    });
   }
 
   const ticketAfter = store.getTicketById(ticketId);
@@ -1365,7 +1371,7 @@ function handleExecutionStoreError(res, err, req = null) {
     return req ? sendAgentError(req, res, statusCode, body) : res.status(statusCode).json(body);
   }
 
-  console.error('[API] execution worker 失败:', err?.message || err);
+  logger.error('execution worker failed', { error: err });
   return req
     ? sendAgentError(req, res, 500, body)
     : res.status(500).json(body);
@@ -3181,14 +3187,14 @@ function collectAuditResultNudges(allTickets) {
       : Math.max(getTicketSlaMinutes(ticket), 0);
     if (!Number.isFinite(inferredStaleMinutes) || inferredStaleMinutes <= 0) continue;
     const nudgeLevel = resolveNudgeLevel(ticket, inferredStaleMinutes);
-    console.log('[audit_result_nudge]', {
+    logger.info('audit result nudge candidate', {
       ticket_id: ticket.id,
       audit_type: auditResult.audit_type,
       raw_stale_minutes: rawStaleMinutes,
       inferred_stale_minutes: inferredStaleMinutes,
       nudge_level: nudgeLevel,
       suggested_action: auditResult.suggested_action,
-    });
+    }, { rateLimitKey: `audit-result-nudge:${ticket.id}:${auditResult.audit_type}:${nudgeLevel}`, rateLimitMs: 60_000 });
     const slaMinutes = getTicketSlaMinutes(ticket);
     const preferredActor = resolveAuditSuggestedActor(ticket, auditResult);
     const targets = resolveNudgeTargets(ticket, nudgeLevel, { preferredActor });

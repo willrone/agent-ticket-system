@@ -2,6 +2,9 @@ import * as store from './store.js';
 import * as dispatch from './dispatch.js';
 import { resolveDispatchDelivery } from './agent-delivery-router.js';
 import { buildAssignmentContract } from './agent-facing.js';
+import { createLogger } from './logger.js';
+
+const logger = createLogger('dispatch.ready');
 
 export function buildDispatchEventGovernance({ ticket, agent, kind, mismatch = null, nudgeSource = null, nudgeKey = null, nudgeLevel = null }) {
   if (kind === 'workflow_mismatch') {
@@ -71,15 +74,15 @@ export function selectDispatchReadyCandidates(allTickets, options = {}) {
       const staleHint = getStaleDeliveryHint(ticket, 'dispatch');
       if (staleHint?.stale) {
         dispatch.clearDispatchEvents(ticket.id);
-        console.log(`[dispatch/ready] Skip #${ticket.id}: stale dispatch (${staleHint.reason})`);
+        logger.info('skip stale dispatch', { ticket_id: ticket.id, reason: staleHint.reason });
         continue;
       }
       if (store.hasUnmetDependencies(ticket.id)) {
-        console.log(`[dispatch/ready] Skip #${ticket.id}: unmet dependencies`);
+        logger.info('skip unmet dependencies', { ticket_id: ticket.id });
         continue;
       }
       if (ticket.advance_chain && ticket.advance_chain.ok === false) {
-        console.log(`[dispatch/ready] Skip #${ticket.id}: invalid advance chain (${ticket.advance_chain.code || 'unknown'})`);
+        logger.warn('skip invalid advance chain', { ticket_id: ticket.id, code: ticket.advance_chain.code || 'unknown' });
         continue;
       }
       if (ticket.status === 'queued') {
@@ -94,7 +97,11 @@ export function selectDispatchReadyCandidates(allTickets, options = {}) {
           });
         } catch (err) {
           if (err?.code === 'EXECUTION_RESERVATION_CONFLICT') {
-            console.log(`[dispatch/ready] Skip #${ticket.id}: assigned_agent ${ticket.assigned_agent} reservation conflict #${err?.conflict_reservation?.ticket_id || 'unknown'}`);
+            logger.info('skip execution reservation conflict', {
+              ticket_id: ticket.id,
+              assigned_agent: ticket.assigned_agent,
+              conflict_ticket_id: err?.conflict_reservation?.ticket_id || null,
+            });
             continue;
           }
           throw err;
@@ -144,12 +151,11 @@ export function buildDispatchReadyProjection(allTickets, { requestId, buildAgent
     try {
       return buildAssignmentContract(assignment, ticket);
     } catch (error) {
-      console.error('[dispatch/ready] buildAssignmentContract failed', {
+      logger.error('buildAssignmentContract failed', {
         assignment_id: assignment?.assignment_id || null,
         ticket_id: ticket?.id || null,
         agent: assignment?.agent_id || ticket?.next_actor || null,
-        message: error?.message || String(error),
-        stack: error?.stack || null,
+        error,
       });
       throw error;
     }
@@ -169,13 +175,18 @@ export function buildDispatchReadyProjection(allTickets, { requestId, buildAgent
     nudgeLevelOrder,
   });
 
-  console.log('[dispatch/ready] Candidates:', candidates.length);
+  logger.debug('selected candidates', { candidate_count: candidates.length, request_id: requestId });
 
   const byAgent = new Map();
   const nudgeReady = [];
   for (const candidate of candidates) {
     const { ticket, agent, kind, mismatch, readyItem } = candidate;
-    console.log(`[dispatch/ready] Checking #${ticket.id} agent=${agent} kind=${kind || 'normal'}`);
+    logger.debug('checking candidate', {
+      ticket_id: ticket.id,
+      agent,
+      kind: kind || 'normal',
+      request_id: requestId,
+    });
     const governance = kind === 'nudge'
       ? {
           reason: readyItem.nudge_key,

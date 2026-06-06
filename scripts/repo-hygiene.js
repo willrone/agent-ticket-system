@@ -17,9 +17,22 @@ const GENERATED_PATTERNS = [
   { label: 'backup sqlite sidecar', dir: 'data/backups', match: (name) => /^.*\.db(?:-shm|-wal)$/.test(name) },
   
   { label: 'memory scratch directory', dir: '.', match: (name) => name === 'memory' },
-  { label: 'tmp scratch directory', dir: '.', match: (name) => name === 'tmp' },
+  {
+    label: 'tmp scratch directory',
+    dir: '.',
+    match: (name, absPath) => name === 'tmp' && !isDirectoryEmpty(absPath),
+  },
   { label: 'root rollout artifacts', dir: '.', match: (name) => name === '.rollout' },
 ];
+
+function isDirectoryEmpty(absPath) {
+  try {
+    if (!fs.statSync(absPath).isDirectory()) return false;
+    return fs.readdirSync(absPath).length === 0;
+  } catch {
+    return false;
+  }
+}
 
 function walkMatches() {
   const matches = [];
@@ -27,8 +40,8 @@ function walkMatches() {
     const absDir = path.join(repoRoot, rule.dir);
     if (!fs.existsSync(absDir)) continue;
     for (const name of fs.readdirSync(absDir)) {
-      if (!rule.match(name)) continue;
       const absPath = path.join(absDir, name);
+      if (!rule.match(name, absPath)) continue;
       const relPath = path.relative(repoRoot, absPath);
       matches.push({ ...rule, absPath, relPath, type: fs.statSync(absPath).isDirectory() ? 'dir' : 'file' });
     }

@@ -6,6 +6,7 @@ const steps = [
   ['lint', ['npm', ['run', 'lint']]],
   ['test', ['npm', ['test']]],
   ['build', ['npm', ['run', 'build']]],
+  ['prod dependency audit', ['npm', ['audit', '--omit=dev', '--audit-level=moderate']]],
   ['mcp smoke', ['npm', ['run', 'mcp:smoke']]],
   ['live contract fixtures', ['npm', ['run', 'validate:live-contract-fixtures']]],
 ];

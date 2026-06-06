@@ -78,22 +78,22 @@ export function classifyLogIncident({
   let category = 'no_signal';
   let summary = '未检测到 incident signal';
 
-  if (freshSignals.length > 0) {
+  if (signals.length > 0 && staleByProcess) {
+    verdict = 'pass';
+    category = 'stale_history';
+    summary = '命中旧日志尾迹，但最后写入早于当前 live 进程启动时间';
+  } else if (signals.length > 0 && healthySurface && staleBySilence) {
+    verdict = 'pass';
+    category = 'stale_history';
+    summary = `命中旧日志尾迹，但已静默 ${silentMinutes} 分钟，按 age-aware stale history 降噪`;
+  } else if (freshSignals.length > 0) {
     verdict = healthySurface ? 'warn' : 'fail';
     category = 'fresh_incident';
     summary = healthySurface
       ? '检测到 fresh incident signal，但当前 live surface 仍可用；需人工复核是否刚恢复'
       : '检测到 fresh incident signal，且 live surface 未恢复';
   } else if (signals.length > 0) {
-    if (staleByProcess) {
-      verdict = 'pass';
-      category = 'stale_history';
-      summary = '命中旧日志尾迹，但最后写入早于当前 live 进程启动时间';
-    } else if (healthySurface && staleBySilence) {
-      verdict = 'pass';
-      category = 'stale_history';
-      summary = `命中旧日志尾迹，但已静默 ${silentMinutes} 分钟，按 age-aware stale history 降噪`;
-    } else if (knownNoiseSignals.length === signals.length) {
+    if (knownNoiseSignals.length === signals.length) {
       verdict = 'pass';
       category = 'known_noise';
       summary = '命中已知历史噪音，且已被上下文条件证明可降噪';

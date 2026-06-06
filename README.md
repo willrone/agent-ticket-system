@@ -37,6 +37,7 @@ npm run build     # 前端构建
 npm run lint      # 最小静态检查
 npm run repo:hygiene          # 检查仓库内是否混入生成物
 npm run repo:hygiene:cleanup  # 清理 api/data test/legacy db 与 .rollout
+npm run release:check         # 发布前完整门禁：hygiene/lint/test/build/prod audit/MCP smoke/live fixture
 ```
 
 ## 文档分层（review / onboarding 时按这个顺序读）
@@ -68,6 +69,7 @@ npm run repo:hygiene:cleanup  # 清理 api/data test/legacy db 与 .rollout
 - `data/backups/`：仅保留人工确认需要的备份，不应持续混入临时 sidecar
 - `api/data/test-*.db*` / `api/data/legacy-*.db*`：测试/迁移生成物，**不应入仓**
 - `.rollout/`：本地 rollout / 临时执行产物，**不应入仓**
+- `tmp/`：本地 scratch 目录；空目录允许存在，非空会被 `repo:hygiene` 标记为待清理
 
 ### 仓库卫生规则（generated artifacts）
 
@@ -108,6 +110,11 @@ npm run repo:hygiene:cleanup
 - 会自动常驻拉起 `api/server.js`
 - 默认 DB：`data/tickets.db`
 - 日志路径：`logs/api.out.log` / `logs/api.err.log`
+- API/轮询器日志使用结构化 JSON logger；常用环境变量：
+  - `TICKET_LOG_LEVEL=debug|info|warn|error|silent`（默认：生产 `info`，测试 `warn`）
+  - `TICKET_LOG_FORMAT=json|pretty`（默认：`json`，便于 grep/jq/日志系统采集）
+  - `TICKET_LOG_STACKS=true`（仅排障时打开，错误日志会包含 stack）
+- logger 会自动脱敏 token/secret/password/api_key/authorization/cookie 等字段，并对重复投递失败类日志做 rate limit 降噪。
 - plist 会显式下发 poller / local base URL / delivery timeout / port / bind host / node bin 等环境变量，便于 live healthcheck 与排障对齐
 - 如需并行拉 v2，可用 `scripts/create-v2-skeleton.sh` 生成同级 `agent-ticket-system-v2` 骨架；详见 `docs/v2-parallel-runbook.md`
 

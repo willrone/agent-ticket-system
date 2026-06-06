@@ -2,6 +2,9 @@ import { getAuditSessionKeyForTicket, NOTIFY_MAIN_SESSION } from './agent-sessio
 import * as store from './store.js';
 import * as dispatchEvents from './dispatch.js';
 import { deliverChatToGateway } from './delivery-transport.js';
+import { createLogger } from './logger.js';
+
+const logger = createLogger('internal-poller');
 
 const DEFAULT_API_BASE_URL = process.env.TICKET_API_BASE_URL || 'http://127.0.0.1:8788';
 const DEFAULT_DISPATCH_INTERVAL_MS = parsePositiveInt(process.env.TICKET_DISPATCH_POLL_INTERVAL_MS, 5 * 1000);
@@ -94,7 +97,7 @@ function createWorker({ name, intervalMs, tick }) {
     try {
       await tick();
     } catch (err) {
-      console.error(`[internal-poller:${name}]`, err?.message || err);
+      logger.error('worker tick failed', { worker: name, error: err });
     } finally {
       running = false;
     }
@@ -118,7 +121,7 @@ function createWorker({ name, intervalMs, tick }) {
 export function startInternalPollers(options = {}) {
   const enabled = parseEnabled(process.env.TICKET_INTERNAL_POLLERS_ENABLED, true);
   if (!enabled) {
-    console.log('[internal-poller] disabled by TICKET_INTERNAL_POLLERS_ENABLED');
+    logger.info('disabled by TICKET_INTERNAL_POLLERS_ENABLED');
     return { stop: () => {} };
   }
 
@@ -194,9 +197,20 @@ export function startInternalPollers(options = {}) {
           }
           const ackResult = await ackDispatch(apiBaseUrl, dispatch_id);
           if (ackResult?.missing) {
-            console.warn(`[internal-poller:dispatch] dispatch_id=${dispatch_id} vanished before ack after successful delivery; treated as stale-cleared`);
+            logger.warn('dispatch vanished before ack after successful delivery; treated as stale-cleared', {
+              worker: 'dispatch',
+              dispatch_id,
+              ticket_id,
+            });
           } else {
-            console.log(`[internal-poller:dispatch] delivered and acked dispatch_id=${dispatch_id} -> ${target_session_key} @ ${target_gateway_id}; waiting for dispatch_receipt before workflow transition`);
+            logger.info('dispatch delivered and acked; waiting for dispatch_receipt before workflow transition', {
+              worker: 'dispatch',
+              dispatch_id,
+              ticket_id,
+              target_session_key,
+              target_gateway_id,
+              transport,
+            });
           }
         } catch (err) {
           const errorMessage = err?.message || String(err);
@@ -230,9 +244,26 @@ export function startInternalPollers(options = {}) {
           const retryState = dispatchEvents.markDispatchDeliveryFailed(dispatch_id);
           store.markAssignmentDeliveryFailedByDispatchEvent(dispatch_id, errorMessage);
           if (retryState?.next_dispatch_retry_at) {
-            console.log(`[internal-poller:dispatch] delivery degraded for dispatch_id=${dispatch_id}; backoff until ${retryState.next_dispatch_retry_at}: ${errorMessage}`);
+            logger.warn('dispatch delivery degraded; backing off', {
+              worker: 'dispatch',
+              dispatch_id,
+              ticket_id,
+              target_session_key,
+              target_gateway_id,
+              transport,
+              next_dispatch_retry_at: retryState.next_dispatch_retry_at,
+              error: errorMessage,
+            }, { rateLimitKey: `dispatch-degraded:${dispatch_id}:${errorMessage}`, rateLimitMs: 60_000 });
           } else {
-            console.error(`[internal-poller:dispatch] delivery failed for dispatch_id=${dispatch_id}, no ack:`, errorMessage);
+            logger.error('dispatch delivery failed without ack', {
+              worker: 'dispatch',
+              dispatch_id,
+              ticket_id,
+              target_session_key,
+              target_gateway_id,
+              transport,
+              error: errorMessage,
+            }, { rateLimitKey: `dispatch-failed:${dispatch_id}:${errorMessage}`, rateLimitMs: 60_000 });
           }
         }
       }
@@ -274,7 +305,14 @@ export function startInternalPollers(options = {}) {
           });
           dispatchEvents.resolvePendingForward('notification', event_id, { channel: 'telegram', resolution: 'delivered' });
           await ackNotification(apiBaseUrl, event_id);
-          console.log(`[internal-poller:notify] delivered and acked event_id=${event_id} -> ${target_session_key} @ ${target_gateway_id}`);
+          logger.info('notification delivered and acked', {
+            worker: 'notify',
+            event_id,
+            ticket_id,
+            target_session_key,
+            target_gateway_id,
+            transport,
+          });
         } catch (err) {
           dispatchEvents.recordDeliveryAttempt({
             eventKind: 'notification',
@@ -301,7 +339,15 @@ export function startInternalPollers(options = {}) {
               type: type || null,
             },
           });
-          console.error(`[internal-poller:notify] delivery failed for event_id=${event_id}, no ack:`, err?.message || err);
+          logger.error('notification delivery failed without ack', {
+            worker: 'notify',
+            event_id,
+            ticket_id,
+            target_session_key,
+            target_gateway_id,
+            transport,
+            error: err,
+          }, { rateLimitKey: `notify-failed:${event_id}:${err?.message || err}`, rateLimitMs: 60_000 });
         }
       }
     },
@@ -342,7 +388,12 @@ export function startInternalPollers(options = {}) {
             result,
           });
           await ackAudit(apiBaseUrl, audit_id);
-          console.log(`[internal-poller:audit] delivered and acked audit_id=${audit_id} -> ${targetSessionKey}`);
+          logger.info('audit delivered and acked', {
+            worker: 'audit',
+            audit_id,
+            ticket_id,
+            target_session_key: targetSessionKey,
+          });
         } catch (err) {
           dispatchEvents.recordDeliveryAttempt({
             eventKind: 'audit',
@@ -354,7 +405,13 @@ export function startInternalPollers(options = {}) {
             ok: false,
             error: err?.message || String(err),
           });
-          console.error(`[internal-poller:audit] delivery failed for audit_id=${audit_id}, no ack:`, err?.message || err);
+          logger.error('audit delivery failed without ack', {
+            worker: 'audit',
+            audit_id,
+            ticket_id,
+            target_session_key: targetSessionKey,
+            error: err,
+          }, { rateLimitKey: `audit-failed:${audit_id}:${err?.message || err}`, rateLimitMs: 60_000 });
         }
       }
     },
@@ -364,13 +421,13 @@ export function startInternalPollers(options = {}) {
   notifyWorker.start();
   auditWorker.start();
 
-  console.log('[internal-poller] started (direct-drive)', {
-    apiBaseUrl,
-    dispatchIntervalMs,
-    notifyIntervalMs,
-    auditIntervalMs,
-    deliveryTimeoutMs,
-    notifySession: NOTIFY_MAIN_SESSION,
+  logger.info('started direct-drive pollers', {
+    api_base_url: apiBaseUrl,
+    dispatch_interval_ms: dispatchIntervalMs,
+    notify_interval_ms: notifyIntervalMs,
+    audit_interval_ms: auditIntervalMs,
+    delivery_timeout_ms: deliveryTimeoutMs,
+    notify_session: NOTIFY_MAIN_SESSION,
   });
 
   return {

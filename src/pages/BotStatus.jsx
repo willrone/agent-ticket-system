@@ -647,7 +647,7 @@ export default function BotStatus() {
   }, []);
 
   useEffect(() => {
-    loadBots();
+    void Promise.resolve().then(loadBots);
   }, [loadBots]);
 
   const selected = useMemo(
